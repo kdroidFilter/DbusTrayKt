@@ -9,6 +9,8 @@ import org.freedesktop.dbus.interfaces.Properties
 import org.freedesktop.dbus.messages.DBusSignal
 import org.freedesktop.dbus.types.UInt32
 import org.freedesktop.dbus.types.Variant
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
 import java.util.concurrent.locks.ReentrantReadWriteLock
 import kotlin.concurrent.read
 import kotlin.concurrent.write
@@ -41,6 +43,7 @@ data class MenuEntry(
 )
 
 class DbusMenu(private val conn: DBusConnection, private val objectPath: String = Systray.PATH_MENU) : DbusMenuMinimal, Properties {
+    private val logger: Logger = LoggerFactory.getLogger(DbusMenu::class.java)
 
     class LayoutUpdatedSignal(path: String, revision: UInt32, parent: Int)
         : DBusSignal(path, Systray.IFACE_MENU, "LayoutUpdated", revision, parent), DBusInterface {
@@ -61,27 +64,36 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
     @Volatile private var version: UInt32 = UInt32(revision.toLong())
 
     init {
+        logger.debug("Initializing DbusMenu at path: {}", objectPath)
         items[ROOT_ID] = MenuEntry(ROOT_ID, label = "root", visible = false)
+        logger.debug("Created root menu entry with ID: {}", ROOT_ID)
     }
 
     fun addItem(id: Int, label: String, checkable: Boolean, checked: Boolean, onClick: (() -> Unit)? = null, onToggle: ((Boolean) -> Unit)? = null, parent: Int = ROOT_ID): Int {
+        logger.debug("Adding menu item: '{}' with id {} to parent {}, checkable: {}, checked: {}", 
+            label, id, parent, checkable, checked)
         lock.write {
             val e = MenuEntry(id, label, true, true, checkable, checked, false, mutableListOf(), onClick, onToggle, parent)
             items[id] = e
             items[parent]?.children?.add(id)
             bumpRevisionLocked()
+            logger.trace("Menu item added to internal structure, revision bumped")
         }
+        logger.debug("Emitting layout updated signal for new menu item")
         emitLayoutUpdated()
         return id
     }
 
     fun addSeparator(id: Int, parent: Int = ROOT_ID): Int {
+        logger.debug("Adding separator with id {} to parent {}", id, parent)
         lock.write {
             val e = MenuEntry(id, label = "", sep = true, enabled = false, visible = true, parent = parent)
             items[id] = e
             items[parent]?.children?.add(id)
             bumpRevisionLocked()
+            logger.trace("Separator added to internal structure, revision bumped")
         }
+        logger.debug("Emitting layout updated signal for new separator")
         emitLayoutUpdated()
         return id
     }
@@ -97,15 +109,28 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
     }
 
     private fun mutate(id: Int, op: (MenuEntry) -> String?): Unit {
+        logger.debug("Mutating menu item with id {}", id)
         var key: String? = null
         var changed = false
         lock.write {
-            val e = items[id] ?: return
+            val e = items[id] ?: run {
+                logger.warn("Attempted to mutate non-existent menu item with id {}", id)
+                return
+            }
             key = op(e)
-            changed = true
-            bumpRevisionLocked()
+            if (key != null) {
+                logger.debug("Changed property '{}' for menu item {}", key, id)
+                changed = true
+                bumpRevisionLocked()
+                logger.trace("Menu item updated in internal structure, revision bumped")
+            } else {
+                logger.debug("No changes made to menu item {}", id)
+            }
         }
-        if (changed) emitItemsPropertiesUpdated(listOf(id), listOfNotNull(key))
+        if (changed) {
+            logger.debug("Emitting properties updated signal for menu item {}, property: {}", id, key)
+            emitItemsPropertiesUpdated(listOf(id), listOfNotNull(key))
+        }
     }
 
     override fun getLayout(parentID: Int, recursionDepth: Int, propertyNames: Array<String>): LayoutReply =
@@ -177,26 +202,43 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
     private fun bumpRevisionLocked() {
         revision++
         version = UInt32(revision.toLong())
+        logger.trace("Revision bumped to {}", revision)
     }
 
     internal fun emitLayoutUpdated(parent: Int = ROOT_ID) {
-        try { conn.sendMessage(LayoutUpdatedSignal(objectPath, UInt32(revision.toLong()), parent)) } catch (e: Exception) {
-            System.err.println("emitLayoutUpdated(): ${e.message}")
+        logger.trace("Emitting LayoutUpdated signal for parent {}, revision {}", parent, revision)
+        try { 
+            conn.sendMessage(LayoutUpdatedSignal(objectPath, UInt32(revision.toLong()), parent))
+            logger.trace("LayoutUpdated signal sent successfully")
+        } catch (e: Exception) {
+            logger.error("Failed to emit LayoutUpdated signal: {}", e.message, e)
         }
     }
 
     internal fun emitItemsPropertiesUpdated(ids: List<Int>, keys: List<String>) {
+        logger.trace("Emitting ItemsPropertiesUpdated signal for ids: {}, keys: {}", ids, keys)
         val updatedList = mutableListOf<Array<Any>>()
         lock.read {
             ids.forEach { id ->
-                items[id]?.let { updatedList += arrayOf(id, propsLocked(it, keys)) }
+                items[id]?.let { 
+                    logger.trace("Adding properties for menu item {}", id)
+                    updatedList += arrayOf(id, propsLocked(it, keys)) 
+                } ?: logger.warn("Attempted to emit properties for non-existent menu item with id {}", id)
             }
         }
+        
+        if (updatedList.isEmpty()) {
+            logger.debug("No properties to update, skipping signal emission")
+            return
+        }
+        
         val removedList = emptyArray<Array<Any>>()
         try {
+            logger.trace("Sending ItemsPropertiesUpdated signal with {} updated items", updatedList.size)
             conn.sendMessage(ItemsPropertiesUpdatedSignal(objectPath, updatedList.toTypedArray(), removedList))
+            logger.trace("ItemsPropertiesUpdated signal sent successfully")
         } catch (e: Exception) {
-            System.err.println("emitItemsPropertiesUpdated(): ${e.message}")
+            logger.error("Failed to emit ItemsPropertiesUpdated signal: {}", e.message, e)
         }
     }
 
