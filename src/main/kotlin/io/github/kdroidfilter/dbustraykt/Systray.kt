@@ -1,11 +1,3 @@
-// -*- kotlin -*-
-// SystrayFixed.kt – Corrected version to ensure icon display and robust watcher registration
-// -------------------------------------------------------------
-// This file merges and updates the original Kotlin sources to reflect the Go implementation logic,
-// with fixes for icon display and improved DBus watcher registration.
-// Changes are marked with «//! CHANGED», «//! FIXED», or «//! ADDED».
-// -------------------------------------------------------------
-
 package io.github.kdroidfilter.dbustraykt
 
 import org.freedesktop.dbus.DBusPath
@@ -14,7 +6,9 @@ import org.freedesktop.dbus.annotations.DBusInterfaceName
 import org.freedesktop.dbus.annotations.Position
 import org.freedesktop.dbus.connections.impl.DBusConnection
 import org.freedesktop.dbus.connections.impl.DBusConnectionBuilder
+import org.freedesktop.dbus.exceptions.DBusException
 import org.freedesktop.dbus.interfaces.DBusInterface
+import org.freedesktop.dbus.interfaces.Introspectable
 import org.freedesktop.dbus.interfaces.Properties
 import org.freedesktop.dbus.messages.DBusSignal
 import org.freedesktop.dbus.types.UInt32
@@ -29,18 +23,11 @@ import javax.imageio.ImageIO
 import kotlin.concurrent.read
 import kotlin.concurrent.write
 
-//-----------------------------------------------------------------
-// 1. Constantes & types utilitaires
-//-----------------------------------------------------------------
 private const val ROOT_ID = 0
 internal const val PATH_ITEM = "/StatusNotifierItem"
 internal const val PATH_MENU = "/StatusNotifierMenu"
 internal const val IFACE_SNI = "org.kde.StatusNotifierItem"
 internal const val IFACE_MENU = "com.canonical.dbusmenu"
-
-//-----------------------------------------------------------------
-// 2. MenuEntry – unchanged except for adding visible field defaulting to true
-//-----------------------------------------------------------------
 
 data class MenuEntry(
     val id: Int,
@@ -56,10 +43,6 @@ data class MenuEntry(
     val parent: Int = ROOT_ID
 )
 
-//-----------------------------------------------------------------
-// 3. DbusMenu – same logic as Go version
-//-----------------------------------------------------------------
-
 @DBusInterfaceName(IFACE_MENU)
 interface DbusMenuMinimal : DBusInterface {
     fun GetLayout(parentID: Int, recursionDepth: Int, propertyNames: Array<String>): LayoutReply
@@ -72,33 +55,33 @@ interface DbusMenuMinimal : DBusInterface {
 }
 
 class DbusMenu(private val conn: DBusConnection, private val objectPath: String = PATH_MENU) :
-    DbusMenuMinimal,
-    Properties {
+    DbusMenuMinimal, Properties, Introspectable {
 
-    // Signals ----------------------------------------------------
-    class LayoutUpdatedSignal(path: String, revision: UInt32) :
-        DBusSignal(path, IFACE_MENU, "LayoutUpdated", revision), DBusInterface {
+    class LayoutUpdatedSignal(path: String, revision: UInt32, parent: Int = ROOT_ID) :
+        DBusSignal(path, IFACE_MENU, "LayoutUpdated", revision, parent), DBusInterface {
         override fun getObjectPath(): String = path
     }
 
-    class ItemsPropertiesUpdatedSignal(path: String,
-                                       updated: Array<Array<Any>>, removed: Array<Array<Any>>) :
-        DBusSignal(path, IFACE_MENU, "ItemsPropertiesUpdated", updated, removed), DBusInterface {
+    // New struct for removed properties
+    class RemovedProperty(
+        @field:Position(0) val id: Int,
+        @field:Position(1) val properties: Array<String>
+    ) : Struct()
+
+    class ItemsPropertiesUpdatedSignal(
+        path: String,
+        updated: Array<MenuProperty>,
+        removed: Array<RemovedProperty>
+    ) : DBusSignal(path, IFACE_MENU, "ItemsPropertiesUpdated", updated, removed), DBusInterface {
         override fun getObjectPath(): String = path
     }
-
-    // Internal state ----------------------------------------------
     private val lock = ReentrantReadWriteLock()
     private val items = LinkedHashMap<Int, MenuEntry>()
-    private var menuVersion: UInt = 1u //! CHANGED – aligned with Go
+    private var menuVersion: UInt = 1u
 
     init {
         items[ROOT_ID] = MenuEntry(ROOT_ID, label = "root", visible = false)
     }
-
-    //-----------------------------------------------------------------
-    // 3.1. Public API for mutation – reflects Go API
-    //-----------------------------------------------------------------
 
     fun addItem(
         id: Int,
@@ -113,6 +96,9 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
             items[id] = MenuEntry(id, label, true, true, checkable, checked, false,
                 onClick = onClick, onToggle = onToggle, parent = parent)
             items[parent]?.children?.add(id)
+            if (items[parent]?.children?.isNotEmpty() == true) {
+                items[parent]?.let { emitItemsPropertiesUpdated(listOf(parent), listOf("children-display")) }
+            }
             bumpVersionLocked()
         }
         emitLayoutUpdated()
@@ -129,15 +115,13 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
         return id
     }
 
-    // Mutators --------------------------------------------------
-
-    fun setLabel(id: Int, label: String)   = mutate(id) { it.label = label ; listOf("label") }
+    fun setLabel(id: Int, label: String) = mutate(id) { it.label = label ; listOf("label") }
     fun setEnabled(id: Int, enabled: Boolean) = mutate(id) { it.enabled = enabled ; listOf("enabled") }
     fun setVisible(id: Int, visible: Boolean) = mutate(id) { it.visible = visible ; listOf("visible") }
     fun setChecked(id: Int, checked: Boolean) = mutate(id) {
         if (it.checkable) { it.checked = checked ; listOf("toggle-state") } else emptyList() }
 
-    fun resetMenu() { //! CHANGED – Go logic
+    fun resetMenu() {
         lock.write {
             items.clear()
             items[ROOT_ID] = MenuEntry(ROOT_ID, label = "root", visible = false)
@@ -145,10 +129,6 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
         }
         emitLayoutUpdated()
     }
-
-    //-----------------------------------------------------------------
-    // 3.2. DBus implementation (interface)
-    //-----------------------------------------------------------------
 
     override fun GetLayout(parentID: Int, recursionDepth: Int, propertyNames: Array<String>): LayoutReply =
         lock.read {
@@ -181,10 +161,6 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
     override fun AboutToShowGroup(ids: Array<Int>): ShowGroupReply = ShowGroupReply(emptyArray(), emptyArray())
     override fun getObjectPath(): String = objectPath
 
-    //-----------------------------------------------------------------
-    // 3.3. Internal events
-    //-----------------------------------------------------------------
-
     private fun handleEvent(id: Int, eventID: String) {
         if (eventID != "clicked") return
         var toggleChanged = false
@@ -192,11 +168,12 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
         lock.write {
             val e = items[id] ?: return
             if (e.sep) return
+            println("Menu item clicked: id=$id, label=${e.label}")
             if (e.checkable) {
                 e.checked = !e.checked
                 toggleChanged = true
             }
-            entryCopy = e.copy() // for invocation outside lock
+            entryCopy = e.copy()
         }
         entryCopy?.onClick?.invoke()
         if (toggleChanged) {
@@ -204,10 +181,6 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
             emitItemsPropertiesUpdated(listOf(id), listOf("toggle-state"))
         }
     }
-
-    //-----------------------------------------------------------------
-    // 3.4. Helpers
-    //-----------------------------------------------------------------
 
     private fun buildLayoutNodeLocked(id: Int, depth: Int): LayoutNode {
         val e = items[id] ?: items[ROOT_ID]!!
@@ -219,15 +192,18 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
 
     private fun propsLocked(e: MenuEntry, filter: List<String> = emptyList()): Map<String, Variant<*>> {
         val p = LinkedHashMap<String, Variant<*>>()
-        fun put(key: String, v: Any?) { if (filter.isEmpty() || key in filter) p[key] = Variant(v) }
+        fun put(key: String, v: Any) { if (filter.isEmpty() || key in filter) p[key] = Variant(v) }
 
         if (e.sep) {
             put("type", "separator")
             return p
         }
+        if (e.id == ROOT_ID) {
+            put("children-display", "submenu")
+        }
         put("label", e.label)
         put("enabled", e.enabled)
-        put("visible", e.visible) //! CHANGED – visible always present
+        put("visible", e.visible)
         if (e.checkable) {
             put("toggle-type", "checkmark")
             put("toggle-state", if (e.checked) 1 else 0)
@@ -250,25 +226,21 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
 
     internal fun emitLayoutUpdated() {
         runCatching {
-            conn.sendMessage(LayoutUpdatedSignal(objectPath, UInt32(menuVersion.toLong())))
+            conn.sendMessage(LayoutUpdatedSignal(objectPath, UInt32(menuVersion.toLong()), ROOT_ID))
         }.onFailure { System.err.println("emitLayoutUpdated(): ${it.message}") }
     }
 
     internal fun emitItemsPropertiesUpdated(ids: List<Int>, keys: List<String>) {
-        val updates = mutableListOf<Array<Any>>()
+        val updates = mutableListOf<MenuProperty>()
         lock.read {
             ids.forEach { id ->
-                items[id]?.let { updates += arrayOf(id, propsLocked(it, keys)) }
+                items[id]?.let { updates += MenuProperty(id, propsLocked(it, keys)) }
             }
         }
         runCatching {
             conn.sendMessage(ItemsPropertiesUpdatedSignal(objectPath, updates.toTypedArray(), emptyArray()))
         }.onFailure { System.err.println("emitItemsPropertiesUpdated(): ${it.message}") }
     }
-
-    //-----------------------------------------------------------------
-    // 3.5. Implementation org.freedesktop.DBus.Properties
-    //-----------------------------------------------------------------
 
     override fun <T : Any?> Get(iface: String?, prop: String?): T {
         require(iface == IFACE_MENU)
@@ -290,11 +262,87 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
         "TextDirection" to Variant("ltr"),
         "IconThemePath" to Variant(emptyArray<String>())
     )
-}
 
-//-----------------------------------------------------------------
-// 4. DBus Structs (unchanged)
-//-----------------------------------------------------------------
+    override fun Introspect(): String {
+        return """
+        <!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+        "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+        <node name="$objectPath">
+            <interface name="org.freedesktop.DBus.Introspectable">
+                <method name="Introspect">
+                    <arg name="xml_data" type="s" direction="out"/>
+                </method>
+            </interface>
+            <interface name="org.freedesktop.DBus.Properties">
+                <method name="Get">
+                    <arg name="interface_name" type="s" direction="in"/>
+                    <arg name="property_name" type="s" direction="in"/>
+                    <arg name="value" type="v" direction="out"/>
+                </method>
+                <method name="Set">
+                    <arg name="interface_name" type="s" direction="in"/>
+                    <arg name="property_name" type="s" direction="in"/>
+                    <arg name="value" type="v" direction="in"/>
+                </method>
+                <method name="GetAll">
+                    <arg name="interface_name" type="s" direction="in"/>
+                    <arg name="properties" type="a{sv}" direction="out"/>
+                </method>
+            </interface>
+            <interface name="com.canonical.dbusmenu">
+                <method name="GetLayout">
+                    <arg name="parentId" type="i" direction="in"/>
+                    <arg name="recursionDepth" type="i" direction="in"/>
+                    <arg name="propertyNames" type="as" direction="in"/>
+                    <arg name="revision" type="u" direction="out"/>
+                    <arg name="layout" type="(ia{sv}av)" direction="out"/>
+                </method>
+                <method name="GetGroupProperties">
+                    <arg name="ids" type="ai" direction="in"/>
+                    <arg name="propertyNames" type="as" direction="in"/>
+                    <arg name="properties" type="a(ia{sv})" direction="out"/>
+                </method>
+                <method name="GetProperty">
+                    <arg name="id" type="i" direction="in"/>
+                    <arg name="name" type="s" direction="in"/>
+                    <arg name="value" type="v" direction="out"/>
+                </method>
+                <method name="Event">
+                    <arg name="id" type="i" direction="in"/>
+                    <arg name="eventId" type="s" direction="in"/>
+                    <arg name="data" type="v" direction="in"/>
+                    <arg name="timestamp" type="u" direction="in"/>
+                </method>
+                <method name="EventGroup">
+                    <arg name="events" type="a(isvu)" direction="in"/>
+                    <arg name="idErrors" type="ai" direction="out"/>
+                </method>
+                <method name="AboutToShow">
+                    <arg name="id" type="i" direction="in"/>
+                    <arg name="needUpdate" type="b" direction="out"/>
+                </method>
+                <method name="AboutToShowGroup">
+                    <arg name="ids" type="ai" direction="in"/>
+                    <arg name="updatesNeeded" type="ai" direction="out"/>
+                    <arg name="idErrors" type="ai" direction="out"/>
+                </method>
+                <signal name="ItemsPropertiesUpdated">
+                    <arg name="updatedProps" type="a(ia{sv})"/>
+                    <arg name="removedProps" type="a(ias)"/>
+                </signal>
+                <signal name="LayoutUpdated">
+                    <arg name="revision" type="u"/>
+                    <arg name="parent" type="i"/>
+                </signal>
+                <property name="Version" type="u" access="read"/>
+                <property name="TextDirection" type="s" access="read"/>
+                <property name="Status" type="s" access="read"/>
+                <property name="IconThemePath" type="as" access="read"/>
+            </interface>
+        </node>
+        """.trimIndent()
+    }
+}
 
 class LayoutReply(@field:Position(0) val revision: UInt32,
                   @field:Position(1) val root: LayoutNode) : Struct()
@@ -313,10 +361,6 @@ class EventStruct(@field:Position(0) val v0: Int,
 
 class ShowGroupReply(@field:Position(0) val updatesNeeded: Array<Int>,
                      @field:Position(1) val idErrors: Array<Int>) : Struct()
-
-//-----------------------------------------------------------------
-// 5. Systray façade – fixes for watcher registration and icon display
-//-----------------------------------------------------------------
 
 @DBusInterfaceName("org.kde.StatusNotifierWatcher")
 interface StatusNotifierWatcher : DBusInterface {
@@ -348,14 +392,16 @@ object Systray {
         // 2. Objects
         itemImpl = StatusNotifierItemImpl(iconBytes, title, tooltip, onClick, onDblClick, onRightClick)
         menuImpl = DbusMenu(conn, PATH_MENU)
-        conn.exportObject(PATH_ITEM, itemImpl)
-        conn.exportObject(PATH_MENU, menuImpl)
 
-        // 3. Unique name
+        // 3. Export objects with all interfaces
+        conn.exportObject(PATH_ITEM, itemImpl) // Exports StatusNotifierItem, Properties, and Introspectable
+        conn.exportObject(PATH_MENU, menuImpl) // Exports DbusMenuMinimal, Properties, and Introspectable
+
+        // 4. Unique name
         val uniqueName = "org.kde.StatusNotifierItem-${ProcessHandle.current().pid()}-1"
         conn.requestBusName(uniqueName)
 
-        // 4. Register watcher (improved) //! ADDED
+        // 5. Register watcher
         runCatching {
             val watcher = conn.getRemoteObject(
                 "org.kde.StatusNotifierWatcher",
@@ -368,9 +414,6 @@ object Systray {
             System.err.println("Failed to register with StatusNotifierWatcher: ${it.message}. Continuing without watcher.")
         }
 
-        // 5. Initial propagation
-        itemImpl.emitNewIcon()
-        itemImpl.emitPropertiesChanged("IconPixmap", "ToolTip", "Title")
         keepAlive()
     }
 
@@ -388,10 +431,9 @@ object Systray {
         executor.shutdownNow()
     }
 
-    // ---- Exported wrappers ----------------------------------------------------
     @JvmStatic fun setIcon(bytes: ByteArray) = itemImpl.setIcon(bytes)
-    @JvmStatic fun setTitle(t: String)       = itemImpl.setTitle(t)
-    @JvmStatic fun setTooltip(t: String)     = itemImpl.setTooltip(t)
+    @JvmStatic fun setTitle(t: String) = itemImpl.setTitle(t)
+    @JvmStatic fun setTooltip(t: String) = itemImpl.setTooltip(t)
 
     @JvmStatic fun addMenuItem(label: String, onClick: (() -> Unit)? = null): Int =
         menuImpl.addItem(idSrc.incrementAndGet(), label, onClick = onClick)
@@ -403,19 +445,17 @@ object Systray {
 
     @JvmStatic fun addSeparator(): Int = menuImpl.addSeparator(idSrc.incrementAndGet())
 
-    @JvmStatic fun setMenuItemLabel(id: Int, label: String)     = menuImpl.setLabel(id, label)
-    @JvmStatic fun setMenuItemEnabled(id: Int, enabled: Boolean)= menuImpl.setEnabled(id, enabled)
-    @JvmStatic fun setMenuItemChecked(id: Int, checked: Boolean)= menuImpl.setChecked(id, checked)
-    @JvmStatic fun setMenuItemVisible(id: Int, visible: Boolean)= menuImpl.setVisible(id, visible)
-
-    //-----------------------------------------------------------------
-    // 5.1. StatusNotifierItem implementation (fixed for icon display)
-    //-----------------------------------------------------------------
+    @JvmStatic fun setMenuItemLabel(id: Int, label: String) = menuImpl.setLabel(id, label)
+    @JvmStatic fun setMenuItemEnabled(id: Int, enabled: Boolean) = menuImpl.setEnabled(id, enabled)
+    @JvmStatic fun setMenuItemChecked(id: Int, checked: Boolean) = menuImpl.setChecked(id, checked)
+    @JvmStatic fun setMenuItemVisible(id: Int, visible: Boolean) = menuImpl.setVisible(id, visible)
 
     @DBusInterfaceName(IFACE_SNI)
     interface StatusNotifierItem : DBusInterface {
         fun Activate(x: Int, y: Int)
         fun SecondaryActivate(x: Int, y: Int)
+        fun ContextMenu(x: Int, y: Int)
+        fun Scroll(delta: Int, orientation: String)
     }
 
     private class StatusNotifierItemImpl(
@@ -425,16 +465,18 @@ object Systray {
         private val onClick: (() -> Unit)?,
         private val onDblClick: (() -> Unit)?,
         private val onRightClick: (() -> Unit)?,
-    ) : StatusNotifierItem, Properties {
+    ) : StatusNotifierItem, Properties, Introspectable {
 
         private var lastClick = 0L
         private var iconPixmaps: Array<PxStruct> = buildPixmaps(iconBytes)
 
-        // Signals ------------------------------------------------
         class NewIconSignal(path: String) : DBusSignal(path, IFACE_SNI, "NewIcon"), DBusInterface {
             override fun getObjectPath(): String = path
         }
         class NewTitleSignal(path: String) : DBusSignal(path, IFACE_SNI, "NewTitle"), DBusInterface {
+            override fun getObjectPath(): String = path
+        }
+        class NewMenuSignal(path: String) : DBusSignal(path, IFACE_SNI, "NewMenu"), DBusInterface {
             override fun getObjectPath(): String = path
         }
         class PropertiesChangedSignal(path: String, iface: String, changed: Map<String, Variant<*>>) :
@@ -442,22 +484,26 @@ object Systray {
             override fun getObjectPath(): String = path
         }
 
-        // DBus implementation -----------------------------------
         override fun Activate(x: Int, y: Int) {
             val now = System.currentTimeMillis()
             if (now - lastClick < 400) onDblClick?.invoke() else onClick?.invoke()
             lastClick = now
         }
         override fun SecondaryActivate(x: Int, y: Int) { onRightClick?.invoke() }
+        override fun ContextMenu(x: Int, y: Int) {
+            throw DBusException("Unknown method")
+        }
+        override fun Scroll(delta: Int, orientation: String) {
+            throw DBusException("Unknown method")
+        }
 
-        // Properties helpers
         private fun propertyValue(name: String): Any = when (name) {
             "Status"      -> "Active"
             "Title"       -> title
             "Id"          -> "1"
             "Category"    -> "ApplicationStatus"
             "IconName"    -> ""
-            "IconPixmap"  -> iconPixmaps //! FIXED – return array directly
+            "IconPixmap"  -> iconPixmaps
             "ItemIsMenu"  -> true
             "Menu"        -> DBusPath(PATH_MENU)
             "ToolTip"     -> TooltipStruct("", iconPixmaps.toList(), tooltip, "")
@@ -467,7 +513,7 @@ object Systray {
         override fun <T : Any?> Get(iface: String?, prop: String?): T {
             @Suppress("UNCHECKED_CAST")
             return when (val v = propertyValue(prop!!)) {
-                is Array<*> -> Variant(v) as T //! FIXED – ensure array for IconPixmap
+                is Array<*> -> Variant(v) as T
                 is List<*>  -> Variant(v.toTypedArray()) as T
                 else        -> v as T
             }
@@ -489,13 +535,12 @@ object Systray {
                 "ItemIsMenu","Menu","ToolTip").associateWith {
                 val value = propertyValue(it)
                 when (value) {
-                    is Array<*> -> Variant(value) //! FIXED – ensure array for IconPixmap
+                    is Array<*> -> Variant(value)
                     is List<*>  -> Variant(value.toTypedArray())
                     else        -> Variant(value)
                 }
             }
 
-        // Mutators ---------------------------------------------
         fun setIcon(bytes: ByteArray) {
             iconBytes = bytes; iconPixmaps = buildPixmaps(iconBytes)
             emitNewIcon(); emitPropertiesChanged("IconPixmap")
@@ -503,14 +548,14 @@ object Systray {
         fun setTitle(t: String) { title = t; emitNewTitle(); emitPropertiesChanged("Title") }
         fun setTooltip(t: String) { tooltip = t; emitPropertiesChanged("ToolTip") }
 
-        // Signals
-        fun emitNewIcon()  = sendSignalSafe(NewIconSignal(PATH_ITEM))
+        fun emitNewIcon() = sendSignalSafe(NewIconSignal(PATH_ITEM))
         fun emitNewTitle() = sendSignalSafe(NewTitleSignal(PATH_ITEM))
+        fun emitNewMenu() = sendSignalSafe(NewMenuSignal(PATH_ITEM))
         fun emitPropertiesChanged(vararg names: String) {
             val changed = names.associateWith {
                 val value = propertyValue(it)
                 when (value) {
-                    is Array<*> -> Variant(value) //! FIXED – ensure array for IconPixmap
+                    is Array<*> -> Variant(value)
                     is List<*>  -> Variant(value.toTypedArray())
                     else        -> Variant(value)
                 }
@@ -522,11 +567,67 @@ object Systray {
         }.onFailure { System.err.println("Signal error: ${it.message}") }
 
         override fun getObjectPath(): String = PATH_ITEM
-    }
 
-    //-----------------------------------------------------------------
-    // 6. Icon conversions (unchanged)
-    //-----------------------------------------------------------------
+        override fun Introspect(): String {
+            return """
+            <!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+            "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+            <node name="$PATH_ITEM">
+                <interface name="org.freedesktop.DBus.Introspectable">
+                    <method name="Introspect">
+                        <arg name="xml_data" type="s" direction="out"/>
+                    </method>
+                </interface>
+                <interface name="org.freedesktop.DBus.Properties">
+                    <method name="Get">
+                        <arg name="interface_name" type="s" direction="in"/>
+                        <arg name="property_name" type="s" direction="in"/>
+                        <arg name="value" type="v" direction="out"/>
+                    </method>
+                    <method name="Set">
+                        <arg name="interface_name" type="s" direction="in"/>
+                        <arg name="property_name" type="s" direction="in"/>
+                        <arg name="value" type="v" direction="in"/>
+                    </method>
+                    <method name="GetAll">
+                        <arg name="interface_name" type="s" direction="in"/>
+                        <arg name="properties" type="a{sv}" direction="out"/>
+                    </method>
+                </interface>
+                <interface name="org.kde.StatusNotifierItem">
+                    <method name="Activate">
+                        <arg name="x" type="i" direction="in"/>
+                        <arg name="y" type="i" direction="in"/>
+                    </method>
+                    <method name="SecondaryActivate">
+                        <arg name="x" type="i" direction="in"/>
+                        <arg name="y" type="i" direction="in"/>
+                    </method>
+                    <method name="ContextMenu">
+                        <arg name="x" type="i" direction="in"/>
+                        <arg name="y" type="i" direction="in"/>
+                    </method>
+                    <method name="Scroll">
+                        <arg name="delta" type="i" direction="in"/>
+                        <arg name="orientation" type="s" direction="in"/>
+                    </method>
+                    <signal name="NewIcon"/>
+                    <signal name="NewTitle"/>
+                    <signal name="NewMenu"/>
+                    <property name="Status" type="s" access="read"/>
+                    <property name="Title" type="s" access="readwrite"/>
+                    <property name="Id" type="s" access="read"/>
+                    <property name="Category" type="s" access="read"/>
+                    <property name="IconName" type="s" access="read"/>
+                    <property name="IconPixmap" type="a(iiay)" access="readwrite"/>
+                    <property name="ItemIsMenu" type="b" access="read"/>
+                    <property name="Menu" type="o" access="read"/>
+                    <property name="ToolTip" type="(sa(iiay)ss)" access="readwrite"/>
+                </interface>
+            </node>
+            """.trimIndent()
+        }
+    }
 
     open class PxStruct(@field:Position(0) val w: Int,
                         @field:Position(1) val h: Int,
@@ -540,41 +641,38 @@ object Systray {
     private fun buildPixmaps(src: ByteArray): Array<PxStruct> {
         if (src.isEmpty()) return emptyArray()
         val img = ImageIO.read(ByteArrayInputStream(src)) ?: return emptyArray()
-        val sizes = intArrayOf(16,22,24,32,48)
+        val sizes = intArrayOf(16, 22, 24, 32, 48)
         return sizes.map { sz ->
             val scaled = BufferedImage(sz, sz, BufferedImage.TYPE_INT_ARGB).apply {
-                val g = createGraphics(); g.drawImage(img,0,0,sz,sz,null); g.dispose()
+                val g = createGraphics(); g.drawImage(img, 0, 0, sz, sz, null); g.dispose()
             }
-            val pix = ByteArray(sz*sz*4)
+            val pix = ByteArray(sz * sz * 4)
             var i = 0
             for (y in 0 until sz) for (x in 0 until sz) {
-                val argb = scaled.getRGB(x,y)
+                val argb = scaled.getRGB(x, y)
                 pix[i++] = ((argb ushr 24) and 0xFF).toByte()
                 pix[i++] = ((argb ushr 16) and 0xFF).toByte()
                 pix[i++] = ((argb ushr 8) and 0xFF).toByte()
                 pix[i++] = (argb and 0xFF).toByte()
             }
-            PxStruct(sz,sz,pix)
+            PxStruct(sz, sz, pix)
         }.toTypedArray()
     }
 
     private fun argbToPng(px: PxStruct): ByteArray {
-        if (px.w==0||px.h==0) return ByteArray(0)
+        if (px.w == 0 || px.h == 0) return ByteArray(0)
         val img = BufferedImage(px.w, px.h, BufferedImage.TYPE_INT_ARGB)
-        var i=0
+        var i = 0
         for (y in 0 until px.h) for (x in 0 until px.w) {
-            val a=(px.pix[i++].toInt() and 0xFF) shl 24
-            val r=(px.pix[i++].toInt() and 0xFF) shl 16
-            val g=(px.pix[i++].toInt() and 0xFF) shl 8
-            val b=(px.pix[i++].toInt() and 0xFF)
-            img.setRGB(x,y,a or r or g or b)
+            val a = (px.pix[i++].toInt() and 0xFF) shl 24
+            val r = (px.pix[i++].toInt() and 0xFF) shl 16
+            val g = (px.pix[i++].toInt() and 0xFF) shl 8
+            val b = (px.pix[i++].toInt() and 0xFF)
+            img.setRGB(x, y, a or r or g or b)
         }
-        return ByteArrayOutputStream().use { ImageIO.write(img,"png",it); it.toByteArray() }
+        return ByteArrayOutputStream().use { ImageIO.write(img, "png", it); it.toByteArray() }
     }
 
-    //-----------------------------------------------------------------
-    // 7. Keep JVM alive (unchanged)
-    //-----------------------------------------------------------------
     private fun keepAlive() {
         val t = Thread({ while (running && conn.isConnected) Thread.sleep(5000) }, "Systray-keepalive")
         t.isDaemon = false; t.start()
