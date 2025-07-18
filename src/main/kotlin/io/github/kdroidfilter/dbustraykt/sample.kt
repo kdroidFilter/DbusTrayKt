@@ -5,10 +5,6 @@ import java.awt.image.BufferedImage
 import java.io.ByteArrayOutputStream
 import javax.imageio.ImageIO
 import kotlin.system.exitProcess
-import org.slf4j.Logger
-import org.slf4j.LoggerFactory
-
-private val logger: Logger = LoggerFactory.getLogger("DbusTrayKt")
 
 fun main() {
     val iconBytes = generateIcon()
@@ -17,26 +13,26 @@ fun main() {
         iconBytes = iconBytes,
         title = "Tray Demo",
         tooltip = "Systray demo (Kotlin/DBus)",
-        onClick = { logger.info("Primary click") },
-        onDblClick = { logger.info("Double click") },
-        onRightClick = { logger.info("Right click") }
+        onClick = { println("Primary click") },
+        onDblClick = { println("Double click") },
+        onRightClick = { println("Right click") }
     )
 
     // Build a minimal functional menu
     val helloId = Systray.addMenuItem("Say Hello") {
-        logger.info("Hello from tray menu")
+        println("Hello from tray menu")
     }
     Systray.addMenuItemCheckbox("Enable Feature", checked = false) { checked ->
-        logger.info("Feature toggled: $checked")
+        println("Feature toggled: $checked")
     }
     Systray.addSeparator()
     Systray.addMenuItem("Quit") {
-        logger.info("Quitting…")
+        println("Quitting…")
         Systray.quit()
         exitProcess(0)
     }
 
-    logger.info("Tray running. Press ENTER to update label; 'q'+ENTER to quit.")
+    println("Tray running. Press ENTER to update label; 'q'+ENTER to quit.")
     while (true) {
         val line = readlnOrNull() ?: break
         if (line.equals("q", ignoreCase = true)) {

@@ -14,8 +14,6 @@ import org.freedesktop.dbus.interfaces.DBusInterface
 import org.freedesktop.dbus.interfaces.Properties
 import org.freedesktop.dbus.messages.DBusSignal
 import org.freedesktop.dbus.types.Variant
-import org.slf4j.Logger
-import org.slf4j.LoggerFactory
 import java.awt.image.BufferedImage
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -35,8 +33,6 @@ private val libc = Native.load("c", LibC::class.java)
  * Public Systray facade
  * ------------------------------------------------------------------------------------------------ */
 object Systray {
-    /* ---- Logger ---- */
-    private val logger: Logger = LoggerFactory.getLogger(Systray::class.java)
 
     /* ---- DBus constants ---- */
     internal const val PATH_ITEM = "/StatusNotifierItem"
@@ -66,59 +62,41 @@ object Systray {
         onDblClick: (() -> Unit)? = null,
         onRightClick: (() -> Unit)? = null
     ) {
-        if (running) {
-            logger.warn("Systray is already running, ignoring run request")
-            return
-        }
-        logger.info("Starting Systray with title: {}", title)
+        if (running) return
         running = true
 
         /* 1. Connect to session bus */
-        logger.debug("Connecting to DBus session bus")
         conn = DBusConnectionBuilder.forSessionBus().build()
-        logger.debug("Connected to DBus session bus")
 
         /* 2. Export objects */
-        logger.debug("Creating StatusNotifierItem and DbusMenu implementations")
         itemImpl = StatusNotifierItemImpl(iconBytes, title, tooltip, onClick, onDblClick, onRightClick)
         menuImpl = DbusMenu(conn, PATH_MENU)
-        logger.debug("Exporting StatusNotifierItem at {}", PATH_ITEM)
         conn.exportObject(PATH_ITEM, itemImpl)
-        logger.info("Successfully exported StatusNotifierItem at {}", PATH_ITEM)
         try {
             conn.exportObject(PATH_MENU, menuImpl)
-            logger.info("Successfully exported DbusMenu at {}", PATH_MENU)
+            println("Successfully exported DbusMenu at $PATH_MENU")
         } catch (e: Exception) {
-            logger.error("Failed to export DbusMenu: {}", e.message, e)
+            System.err.println("Failed to export DbusMenu: ${e.message}")
         }
         /* 3. Own a well-known name */
         val pid = libc.getpid()
         val uniqueName = "org.kde.StatusNotifierItem-$pid-1"
-        logger.debug("Requesting bus name: {}", uniqueName)
         conn.requestBusName(uniqueName)
-        logger.info("Successfully acquired bus name: {}", uniqueName)
 
         /* 4. Register with watcher */
-        logger.debug("Connecting to StatusNotifierWatcher")
         val watcher = conn.getRemoteObject(
             "org.kde.StatusNotifierWatcher",
             "/StatusNotifierWatcher",
             StatusNotifierWatcher::class.java
         )
-        logger.debug("Registering StatusNotifierItem with watcher")
         watcher.RegisterStatusNotifierItem(PATH_ITEM)
-        logger.info("Successfully registered StatusNotifierItem with watcher")
 
         /* 5. Kick icon fetch */
-        logger.debug("Emitting initial signals")
         itemImpl.emitNewIcon()
         itemImpl.emitPropertiesChanged("IconPixmap", "ToolTip", "Title")
-        logger.debug("Initial signals emitted")
 
         /* 6. Keep JVM alive */
-        logger.debug("Setting up keep-alive mechanism")
         keepAlive()
-        logger.info("Systray initialization complete")
     }
 
     /* --------------------------------------------------------------------------------------------
@@ -126,28 +104,19 @@ object Systray {
      * -------------------------------------------------------------------------------------------- */
     @JvmStatic
     fun quit() {
-        if (!running) {
-            logger.debug("Quit called but Systray is not running")
-            return
-        }
-        logger.info("Shutting down Systray")
+        if (!running) return
         running = false
         try {
             if (::conn.isInitialized && conn.isConnected) {
-                logger.debug("Unexporting objects from DBus")
                 conn.unExportObject(PATH_ITEM)
                 conn.unExportObject(PATH_MENU)
-                logger.debug("Waiting for inflight calls to complete")
                 Thread.sleep(200) // allow inflight calls to complete
-                logger.debug("Closing DBus connection")
                 conn.close()
             }
         } catch (e: Exception) {
-            logger.error("Error during Systray shutdown: {}", e.message, e)
+            System.err.println("Systray.quit(): ${e.message}")
         }
-        logger.debug("Shutting down executor")
         executor.shutdownNow()
-        logger.info("Systray shutdown complete")
     }
 
     /* --------------------------------------------------------------------------------------------
@@ -162,17 +131,14 @@ object Systray {
      * -------------------------------------------------------------------------------------------- */
     /** Add a simple clickable menu item. Returns the item id. */
     @JvmStatic
-    fun addMenuItem(label: String, onClick: (() -> Unit)? = null): Int {
-        val id = idSrc.incrementAndGet()
-        logger.debug("Adding menu item: '{}' with id {}", label, id)
-        return menuImpl.addItem(
-            id = id,
+    fun addMenuItem(label: String, onClick: (() -> Unit)? = null): Int =
+        menuImpl.addItem(
+            id = idSrc.incrementAndGet(),
             label = label,
             checkable = false,
             checked = false,
             onClick = onClick
         )
-    }
 
     /** Add a checkable menu item (checkbox). */
     @JvmStatic
@@ -180,49 +146,24 @@ object Systray {
         label: String,
         checked: Boolean = false,
         onToggle: ((Boolean) -> Unit)? = null
-    ): Int {
-        val id = idSrc.incrementAndGet()
-        logger.debug("Adding checkbox menu item: '{}' with id {}, initial state: {}", label, id, if(checked) "checked" else "unchecked")
-        return menuImpl.addItem(
-            id = id,
+    ): Int =
+        menuImpl.addItem(
+            id = idSrc.incrementAndGet(),
             label = label,
             checkable = true,
             checked = checked,
             onToggle = onToggle
         )
-    }
 
     /** Add a separator line. */
     @JvmStatic
-    fun addSeparator(): Int {
-        val id = idSrc.incrementAndGet()
-        logger.debug("Adding separator with id {}", id)
-        return menuImpl.addSeparator(id)
-    }
+    fun addSeparator(): Int =
+        menuImpl.addSeparator(idSrc.incrementAndGet())
 
-    @JvmStatic 
-    fun setMenuItemLabel(id: Int, label: String) {
-        logger.debug("Setting menu item {} label to '{}'", id, label)
-        menuImpl.setLabel(id, label)
-    }
-    
-    @JvmStatic 
-    fun setMenuItemEnabled(id: Int, enabled: Boolean) {
-        logger.debug("Setting menu item {} enabled state to {}", id, enabled)
-        menuImpl.setEnabled(id, enabled)
-    }
-    
-    @JvmStatic 
-    fun setMenuItemChecked(id: Int, checked: Boolean) {
-        logger.debug("Setting menu item {} checked state to {}", id, checked)
-        menuImpl.setChecked(id, checked)
-    }
-    
-    @JvmStatic 
-    fun setMenuItemVisible(id: Int, visible: Boolean) {
-        logger.debug("Setting menu item {} visibility to {}", id, visible)
-        menuImpl.setVisible(id, visible)
-    }
+    @JvmStatic fun setMenuItemLabel(id: Int, label: String)   = menuImpl.setLabel(id, label)
+    @JvmStatic fun setMenuItemEnabled(id: Int, enabled: Boolean) = menuImpl.setEnabled(id, enabled)
+    @JvmStatic fun setMenuItemChecked(id: Int, checked: Boolean) = menuImpl.setChecked(id, checked)
+    @JvmStatic fun setMenuItemVisible(id: Int, visible: Boolean) = menuImpl.setVisible(id, visible)
 
     /* --------------------------------------------------------------------------------------------
      * Interfaces (remote)
@@ -270,7 +211,7 @@ object Systray {
             path,
             "org.freedesktop.DBus.Properties",
             "PropertiesChanged",
-            arrayOf(iface, changed, emptyList<String>())
+            arrayOf<Any>(iface, changed, emptyList<String>())
         ), DBusInterface {
             override fun getObjectPath(): String = path
         }
