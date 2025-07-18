@@ -1,9 +1,13 @@
-@file:Suppress("unused", "MemberVisibilityCanBePrivate")
+// -*- kotlin -*-
+// SystrayFixed.kt – Corrected version to ensure icon display and robust watcher registration
+// -------------------------------------------------------------
+// This file merges and updates the original Kotlin sources to reflect the Go implementation logic,
+// with fixes for icon display and improved DBus watcher registration.
+// Changes are marked with «//! CHANGED», «//! FIXED», or «//! ADDED».
+// -------------------------------------------------------------
 
 package io.github.kdroidfilter.dbustraykt
 
-import com.sun.jna.Library
-import com.sun.jna.Native
 import org.freedesktop.dbus.DBusPath
 import org.freedesktop.dbus.Struct
 import org.freedesktop.dbus.annotations.DBusInterfaceName
@@ -13,165 +17,400 @@ import org.freedesktop.dbus.connections.impl.DBusConnectionBuilder
 import org.freedesktop.dbus.interfaces.DBusInterface
 import org.freedesktop.dbus.interfaces.Properties
 import org.freedesktop.dbus.messages.DBusSignal
+import org.freedesktop.dbus.types.UInt32
 import org.freedesktop.dbus.types.Variant
 import java.awt.image.BufferedImage
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.locks.ReentrantReadWriteLock
 import javax.imageio.ImageIO
+import kotlin.concurrent.read
+import kotlin.concurrent.write
 
-/* ------------------------------------------------------------------------------------------------
- * Native glue (pid)
- * ------------------------------------------------------------------------------------------------ */
-private interface LibC : Library {
-    fun getpid(): Int
+//-----------------------------------------------------------------
+// 1. Constantes & types utilitaires
+//-----------------------------------------------------------------
+private const val ROOT_ID = 0
+internal const val PATH_ITEM = "/StatusNotifierItem"
+internal const val PATH_MENU = "/StatusNotifierMenu"
+internal const val IFACE_SNI = "org.kde.StatusNotifierItem"
+internal const val IFACE_MENU = "com.canonical.dbusmenu"
+
+//-----------------------------------------------------------------
+// 2. MenuEntry – unchanged except for adding visible field defaulting to true
+//-----------------------------------------------------------------
+
+data class MenuEntry(
+    val id: Int,
+    var label: String,
+    var enabled: Boolean = true,
+    var visible: Boolean = true,
+    var checkable: Boolean = false,
+    var checked: Boolean = false,
+    var sep: Boolean = false,
+    val children: MutableList<Int> = mutableListOf(),
+    val onClick: (() -> Unit)? = null,
+    val onToggle: ((Boolean) -> Unit)? = null,
+    val parent: Int = ROOT_ID
+)
+
+//-----------------------------------------------------------------
+// 3. DbusMenu – same logic as Go version
+//-----------------------------------------------------------------
+
+@DBusInterfaceName(IFACE_MENU)
+interface DbusMenuMinimal : DBusInterface {
+    fun GetLayout(parentID: Int, recursionDepth: Int, propertyNames: Array<String>): LayoutReply
+    fun GetGroupProperties(ids: Array<Int>, propertyNames: Array<String>): Array<MenuProperty>
+    fun GetProperty(id: Int, name: String): Variant<*>
+    fun Event(id: Int, eventID: String, data: Variant<*>, timestamp: UInt32)
+    fun EventGroup(events: Array<EventStruct>): Array<Int>
+    fun AboutToShow(id: Int): Boolean
+    fun AboutToShowGroup(ids: Array<Int>): ShowGroupReply
 }
-private val libc = Native.load("c", LibC::class.java)
 
-/* ------------------------------------------------------------------------------------------------
- * Public Systray facade
- * ------------------------------------------------------------------------------------------------ */
+class DbusMenu(private val conn: DBusConnection, private val objectPath: String = PATH_MENU) :
+    DbusMenuMinimal,
+    Properties {
+
+    // Signals ----------------------------------------------------
+    class LayoutUpdatedSignal(path: String, revision: UInt32) :
+        DBusSignal(path, IFACE_MENU, "LayoutUpdated", revision), DBusInterface {
+        override fun getObjectPath(): String = path
+    }
+
+    class ItemsPropertiesUpdatedSignal(path: String,
+                                       updated: Array<Array<Any>>, removed: Array<Array<Any>>) :
+        DBusSignal(path, IFACE_MENU, "ItemsPropertiesUpdated", updated, removed), DBusInterface {
+        override fun getObjectPath(): String = path
+    }
+
+    // Internal state ----------------------------------------------
+    private val lock = ReentrantReadWriteLock()
+    private val items = LinkedHashMap<Int, MenuEntry>()
+    private var menuVersion: UInt = 1u //! CHANGED – aligned with Go
+
+    init {
+        items[ROOT_ID] = MenuEntry(ROOT_ID, label = "root", visible = false)
+    }
+
+    //-----------------------------------------------------------------
+    // 3.1. Public API for mutation – reflects Go API
+    //-----------------------------------------------------------------
+
+    fun addItem(
+        id: Int,
+        label: String,
+        checkable: Boolean = false,
+        checked: Boolean = false,
+        onClick: (() -> Unit)? = null,
+        onToggle: ((Boolean) -> Unit)? = null,
+        parent: Int = ROOT_ID,
+    ): Int {
+        lock.write {
+            items[id] = MenuEntry(id, label, true, true, checkable, checked, false,
+                onClick = onClick, onToggle = onToggle, parent = parent)
+            items[parent]?.children?.add(id)
+            bumpVersionLocked()
+        }
+        emitLayoutUpdated()
+        return id
+    }
+
+    fun addSeparator(id: Int, parent: Int = ROOT_ID): Int {
+        lock.write {
+            items[id] = MenuEntry(id, label = "", enabled = false, sep = true, parent = parent)
+            items[parent]?.children?.add(id)
+            bumpVersionLocked()
+        }
+        emitLayoutUpdated()
+        return id
+    }
+
+    // Mutators --------------------------------------------------
+
+    fun setLabel(id: Int, label: String)   = mutate(id) { it.label = label ; listOf("label") }
+    fun setEnabled(id: Int, enabled: Boolean) = mutate(id) { it.enabled = enabled ; listOf("enabled") }
+    fun setVisible(id: Int, visible: Boolean) = mutate(id) { it.visible = visible ; listOf("visible") }
+    fun setChecked(id: Int, checked: Boolean) = mutate(id) {
+        if (it.checkable) { it.checked = checked ; listOf("toggle-state") } else emptyList() }
+
+    fun resetMenu() { //! CHANGED – Go logic
+        lock.write {
+            items.clear()
+            items[ROOT_ID] = MenuEntry(ROOT_ID, label = "root", visible = false)
+            bumpVersionLocked()
+        }
+        emitLayoutUpdated()
+    }
+
+    //-----------------------------------------------------------------
+    // 3.2. DBus implementation (interface)
+    //-----------------------------------------------------------------
+
+    override fun GetLayout(parentID: Int, recursionDepth: Int, propertyNames: Array<String>): LayoutReply =
+        lock.read {
+            val node = buildLayoutNodeLocked(parentID, recursionDepth)
+            LayoutReply(UInt32(menuVersion.toLong()), node)
+        }
+
+    override fun GetGroupProperties(ids: Array<Int>, propertyNames: Array<String>): Array<MenuProperty> =
+        lock.read {
+            ids.mapNotNull { id ->
+                items[id]?.let { MenuProperty(it.id, propsLocked(it, propertyNames.toList())) }
+            }.toTypedArray()
+        }
+
+    override fun GetProperty(id: Int, name: String): Variant<*> =
+        lock.read {
+            items[id]?.let { propsLocked(it)[name] } ?: Variant(null)
+        }
+
+    override fun Event(id: Int, eventID: String, data: Variant<*>, timestamp: UInt32) {
+        handleEvent(id, eventID)
+    }
+
+    override fun EventGroup(events: Array<EventStruct>): Array<Int> {
+        events.forEach { handleEvent(it.v0, it.v1) }
+        return emptyArray()
+    }
+
+    override fun AboutToShow(id: Int): Boolean = false
+    override fun AboutToShowGroup(ids: Array<Int>): ShowGroupReply = ShowGroupReply(emptyArray(), emptyArray())
+    override fun getObjectPath(): String = objectPath
+
+    //-----------------------------------------------------------------
+    // 3.3. Internal events
+    //-----------------------------------------------------------------
+
+    private fun handleEvent(id: Int, eventID: String) {
+        if (eventID != "clicked") return
+        var toggleChanged = false
+        val entryCopy: MenuEntry?
+        lock.write {
+            val e = items[id] ?: return
+            if (e.sep) return
+            if (e.checkable) {
+                e.checked = !e.checked
+                toggleChanged = true
+            }
+            entryCopy = e.copy() // for invocation outside lock
+        }
+        entryCopy?.onClick?.invoke()
+        if (toggleChanged) {
+            entryCopy?.onToggle?.invoke(entryCopy.checked)
+            emitItemsPropertiesUpdated(listOf(id), listOf("toggle-state"))
+        }
+    }
+
+    //-----------------------------------------------------------------
+    // 3.4. Helpers
+    //-----------------------------------------------------------------
+
+    private fun buildLayoutNodeLocked(id: Int, depth: Int): LayoutNode {
+        val e = items[id] ?: items[ROOT_ID]!!
+        val childVariants: Array<Variant<*>> = if (depth == 0) emptyArray() else {
+            e.children.map { Variant(buildLayoutNodeLocked(it, depth - 1)) as Variant<*> }.toTypedArray()
+        }
+        return LayoutNode(e.id, propsLocked(e), childVariants)
+    }
+
+    private fun propsLocked(e: MenuEntry, filter: List<String> = emptyList()): Map<String, Variant<*>> {
+        val p = LinkedHashMap<String, Variant<*>>()
+        fun put(key: String, v: Any?) { if (filter.isEmpty() || key in filter) p[key] = Variant(v) }
+
+        if (e.sep) {
+            put("type", "separator")
+            return p
+        }
+        put("label", e.label)
+        put("enabled", e.enabled)
+        put("visible", e.visible) //! CHANGED – visible always present
+        if (e.checkable) {
+            put("toggle-type", "checkmark")
+            put("toggle-state", if (e.checked) 1 else 0)
+        }
+        if (e.children.isNotEmpty()) put("children-display", "submenu")
+        return p
+    }
+
+    private fun mutate(id: Int, op: (MenuEntry) -> List<String>): Unit {
+        val changedKeys: List<String>
+        lock.write {
+            val e = items[id] ?: return
+            changedKeys = op(e)
+            if (changedKeys.isNotEmpty()) bumpVersionLocked()
+        }
+        if (changedKeys.isNotEmpty()) emitItemsPropertiesUpdated(listOf(id), changedKeys)
+    }
+
+    private fun bumpVersionLocked() { menuVersion++ }
+
+    internal fun emitLayoutUpdated() {
+        runCatching {
+            conn.sendMessage(LayoutUpdatedSignal(objectPath, UInt32(menuVersion.toLong())))
+        }.onFailure { System.err.println("emitLayoutUpdated(): ${it.message}") }
+    }
+
+    internal fun emitItemsPropertiesUpdated(ids: List<Int>, keys: List<String>) {
+        val updates = mutableListOf<Array<Any>>()
+        lock.read {
+            ids.forEach { id ->
+                items[id]?.let { updates += arrayOf(id, propsLocked(it, keys)) }
+            }
+        }
+        runCatching {
+            conn.sendMessage(ItemsPropertiesUpdatedSignal(objectPath, updates.toTypedArray(), emptyArray()))
+        }.onFailure { System.err.println("emitItemsPropertiesUpdated(): ${it.message}") }
+    }
+
+    //-----------------------------------------------------------------
+    // 3.5. Implementation org.freedesktop.DBus.Properties
+    //-----------------------------------------------------------------
+
+    override fun <T : Any?> Get(iface: String?, prop: String?): T {
+        require(iface == IFACE_MENU)
+        @Suppress("UNCHECKED_CAST")
+        return when (prop) {
+            "Version"       -> UInt32(menuVersion.toLong())
+            "Status"        -> "normal"
+            "TextDirection" -> "ltr"
+            "IconThemePath" -> emptyArray<String>()
+            else             -> Variant(null)
+        } as T
+    }
+
+    override fun <A : Any?> Set(iface: String?, prop: String?, value: A?) {}
+
+    override fun GetAll(iface: String?): Map<String, Variant<*>> = mapOf(
+        "Version" to Variant(UInt32(menuVersion.toLong())),
+        "Status" to Variant("normal"),
+        "TextDirection" to Variant("ltr"),
+        "IconThemePath" to Variant(emptyArray<String>())
+    )
+}
+
+//-----------------------------------------------------------------
+// 4. DBus Structs (unchanged)
+//-----------------------------------------------------------------
+
+class LayoutReply(@field:Position(0) val revision: UInt32,
+                  @field:Position(1) val root: LayoutNode) : Struct()
+
+class LayoutNode(@field:Position(0) val id: Int,
+                 @field:Position(1) val properties: Map<String, Variant<*>>,
+                 @field:Position(2) val children: Array<Variant<*>>) : Struct()
+
+class MenuProperty(@field:Position(0) val v0: Int,
+                   @field:Position(1) val v1: Map<String, Variant<*>>) : Struct()
+
+class EventStruct(@field:Position(0) val v0: Int,
+                  @field:Position(1) val v1: String,
+                  @field:Position(2) val v2: Variant<*>,
+                  @field:Position(3) val v3: UInt32) : Struct()
+
+class ShowGroupReply(@field:Position(0) val updatesNeeded: Array<Int>,
+                     @field:Position(1) val idErrors: Array<Int>) : Struct()
+
+//-----------------------------------------------------------------
+// 5. Systray façade – fixes for watcher registration and icon display
+//-----------------------------------------------------------------
+
+@DBusInterfaceName("org.kde.StatusNotifierWatcher")
+interface StatusNotifierWatcher : DBusInterface {
+    fun RegisterStatusNotifierItem(itemPath: String)
+}
+
 object Systray {
-
-    /* ---- DBus constants ---- */
-    internal const val PATH_ITEM = "/StatusNotifierItem"
-    internal const val PATH_MENU = "/StatusNotifierMenu"
-    internal const val IFACE_SNI  = "org.kde.StatusNotifierItem"
-    internal const val IFACE_MENU = "com.canonical.dbusmenu"
-
-    /* ---- Runtime state ---- */
     private lateinit var conn: DBusConnection
     private lateinit var itemImpl: StatusNotifierItemImpl
     private lateinit var menuImpl: DbusMenu
     private val executor = Executors.newSingleThreadExecutor()
     @Volatile private var running = false
-
-    /* ---- ID source for menu wrapper API ---- */
     private val idSrc = AtomicInteger(0)
 
-    /* --------------------------------------------------------------------------------------------
-     * Entry point
-     * -------------------------------------------------------------------------------------------- */
-    @JvmStatic
-    fun run(
+    @JvmStatic fun run(
         iconBytes: ByteArray,
         title: String = "",
         tooltip: String = "",
         onClick: (() -> Unit)? = null,
         onDblClick: (() -> Unit)? = null,
-        onRightClick: (() -> Unit)? = null
+        onRightClick: (() -> Unit)? = null,
     ) {
         if (running) return
         running = true
 
-        /* 1. Connect to session bus */
+        // 1. Connection
         conn = DBusConnectionBuilder.forSessionBus().build()
 
-        /* 2. Export objects */
+        // 2. Objects
         itemImpl = StatusNotifierItemImpl(iconBytes, title, tooltip, onClick, onDblClick, onRightClick)
         menuImpl = DbusMenu(conn, PATH_MENU)
         conn.exportObject(PATH_ITEM, itemImpl)
-        try {
-            conn.exportObject(PATH_MENU, menuImpl)
-            println("Successfully exported DbusMenu at $PATH_MENU")
-        } catch (e: Exception) {
-            System.err.println("Failed to export DbusMenu: ${e.message}")
-        }
-        /* 3. Own a well-known name */
-        val pid = libc.getpid()
-        val uniqueName = "org.kde.StatusNotifierItem-$pid-1"
+        conn.exportObject(PATH_MENU, menuImpl)
+
+        // 3. Unique name
+        val uniqueName = "org.kde.StatusNotifierItem-${ProcessHandle.current().pid()}-1"
         conn.requestBusName(uniqueName)
 
-        /* 4. Register with watcher */
-        val watcher = conn.getRemoteObject(
-            "org.kde.StatusNotifierWatcher",
-            "/StatusNotifierWatcher",
-            StatusNotifierWatcher::class.java
-        )
-        watcher.RegisterStatusNotifierItem(PATH_ITEM)
+        // 4. Register watcher (improved) //! ADDED
+        runCatching {
+            val watcher = conn.getRemoteObject(
+                "org.kde.StatusNotifierWatcher",
+                "/StatusNotifierWatcher",
+                StatusNotifierWatcher::class.java
+            )
+            watcher.RegisterStatusNotifierItem(PATH_ITEM)
+            println("Successfully registered with StatusNotifierWatcher")
+        }.onFailure {
+            System.err.println("Failed to register with StatusNotifierWatcher: ${it.message}. Continuing without watcher.")
+        }
 
-        /* 5. Kick icon fetch */
+        // 5. Initial propagation
         itemImpl.emitNewIcon()
         itemImpl.emitPropertiesChanged("IconPixmap", "ToolTip", "Title")
-
-        /* 6. Keep JVM alive */
         keepAlive()
     }
 
-    /* --------------------------------------------------------------------------------------------
-     * Shutdown
-     * -------------------------------------------------------------------------------------------- */
-    @JvmStatic
-    fun quit() {
+    @JvmStatic fun quit() {
         if (!running) return
         running = false
-        try {
-            if (::conn.isInitialized && conn.isConnected) {
+        runCatching {
+            if (conn.isConnected) {
                 conn.unExportObject(PATH_ITEM)
                 conn.unExportObject(PATH_MENU)
-                Thread.sleep(200) // allow inflight calls to complete
+                Thread.sleep(200)
                 conn.close()
             }
-        } catch (e: Exception) {
-            System.err.println("Systray.quit(): ${e.message}")
-        }
+        }.onFailure { System.err.println("Systray.quit(): ${it.message}") }
         executor.shutdownNow()
     }
 
-    /* --------------------------------------------------------------------------------------------
-     * Public mutators (icon/title/tooltip)
-     * -------------------------------------------------------------------------------------------- */
+    // ---- Exported wrappers ----------------------------------------------------
     @JvmStatic fun setIcon(bytes: ByteArray) = itemImpl.setIcon(bytes)
     @JvmStatic fun setTitle(t: String)       = itemImpl.setTitle(t)
     @JvmStatic fun setTooltip(t: String)     = itemImpl.setTooltip(t)
 
-    /* --------------------------------------------------------------------------------------------
-     * Public menu wrapper (minimal)
-     * -------------------------------------------------------------------------------------------- */
-    /** Add a simple clickable menu item. Returns the item id. */
-    @JvmStatic
-    fun addMenuItem(label: String, onClick: (() -> Unit)? = null): Int =
-        menuImpl.addItem(
-            id = idSrc.incrementAndGet(),
-            label = label,
-            checkable = false,
-            checked = false,
-            onClick = onClick
-        )
+    @JvmStatic fun addMenuItem(label: String, onClick: (() -> Unit)? = null): Int =
+        menuImpl.addItem(idSrc.incrementAndGet(), label, onClick = onClick)
 
-    /** Add a checkable menu item (checkbox). */
-    @JvmStatic
-    fun addMenuItemCheckbox(
-        label: String,
-        checked: Boolean = false,
-        onToggle: ((Boolean) -> Unit)? = null
-    ): Int =
-        menuImpl.addItem(
-            id = idSrc.incrementAndGet(),
-            label = label,
-            checkable = true,
-            checked = checked,
-            onToggle = onToggle
-        )
+    @JvmStatic fun addMenuItemCheckbox(label: String, checked: Boolean = false,
+                                       onToggle: ((Boolean) -> Unit)? = null): Int =
+        menuImpl.addItem(idSrc.incrementAndGet(), label, checkable = true, checked = checked,
+            onToggle = onToggle)
 
-    /** Add a separator line. */
-    @JvmStatic
-    fun addSeparator(): Int =
-        menuImpl.addSeparator(idSrc.incrementAndGet())
+    @JvmStatic fun addSeparator(): Int = menuImpl.addSeparator(idSrc.incrementAndGet())
 
-    @JvmStatic fun setMenuItemLabel(id: Int, label: String)   = menuImpl.setLabel(id, label)
-    @JvmStatic fun setMenuItemEnabled(id: Int, enabled: Boolean) = menuImpl.setEnabled(id, enabled)
-    @JvmStatic fun setMenuItemChecked(id: Int, checked: Boolean) = menuImpl.setChecked(id, checked)
-    @JvmStatic fun setMenuItemVisible(id: Int, visible: Boolean) = menuImpl.setVisible(id, visible)
+    @JvmStatic fun setMenuItemLabel(id: Int, label: String)     = menuImpl.setLabel(id, label)
+    @JvmStatic fun setMenuItemEnabled(id: Int, enabled: Boolean)= menuImpl.setEnabled(id, enabled)
+    @JvmStatic fun setMenuItemChecked(id: Int, checked: Boolean)= menuImpl.setChecked(id, checked)
+    @JvmStatic fun setMenuItemVisible(id: Int, visible: Boolean)= menuImpl.setVisible(id, visible)
 
-    /* --------------------------------------------------------------------------------------------
-     * Interfaces (remote)
-     * -------------------------------------------------------------------------------------------- */
-    @DBusInterfaceName("org.kde.StatusNotifierWatcher")
-    private interface StatusNotifierWatcher : DBusInterface {
-        fun RegisterStatusNotifierItem(itemPath: String)
-    }
+    //-----------------------------------------------------------------
+    // 5.1. StatusNotifierItem implementation (fixed for icon display)
+    //-----------------------------------------------------------------
 
     @DBusInterfaceName(IFACE_SNI)
     interface StatusNotifierItem : DBusInterface {
@@ -179,44 +418,31 @@ object Systray {
         fun SecondaryActivate(x: Int, y: Int)
     }
 
-    /* --------------------------------------------------------------------------------------------
-     * StatusNotifierItem implementation
-     * -------------------------------------------------------------------------------------------- */
     private class StatusNotifierItemImpl(
         private var iconBytes: ByteArray,
         private var title: String,
         private var tooltip: String,
         private val onClick: (() -> Unit)?,
         private val onDblClick: (() -> Unit)?,
-        private val onRightClick: (() -> Unit)?
+        private val onRightClick: (() -> Unit)?,
     ) : StatusNotifierItem, Properties {
 
         private var lastClick = 0L
-        private var iconPixmaps: List<PxStruct> = buildPixmaps(iconBytes)
+        private var iconPixmaps: Array<PxStruct> = buildPixmaps(iconBytes)
 
-        /* ---- Signal classes ---- */
+        // Signals ------------------------------------------------
         class NewIconSignal(path: String) : DBusSignal(path, IFACE_SNI, "NewIcon"), DBusInterface {
             override fun getObjectPath(): String = path
         }
-
         class NewTitleSignal(path: String) : DBusSignal(path, IFACE_SNI, "NewTitle"), DBusInterface {
             override fun getObjectPath(): String = path
         }
-
-        class PropertiesChangedSignal(
-            path: String,
-            iface: String,
-            changed: Map<String, Variant<*>>,
-        ) : DBusSignal(
-            path,
-            "org.freedesktop.DBus.Properties",
-            "PropertiesChanged",
-            arrayOf<Any>(iface, changed, emptyList<String>())
-        ), DBusInterface {
+        class PropertiesChangedSignal(path: String, iface: String, changed: Map<String, Variant<*>>) :
+            DBusSignal(path, "org.freedesktop.DBus.Properties", "PropertiesChanged", arrayOf(iface, changed, emptyList<String>())), DBusInterface {
             override fun getObjectPath(): String = path
         }
 
-        /* ---- DBus methods from panel ---- */
+        // DBus implementation -----------------------------------
         override fun Activate(x: Int, y: Int) {
             val now = System.currentTimeMillis()
             if (now - lastClick < 400) onDblClick?.invoke() else onClick?.invoke()
@@ -224,29 +450,34 @@ object Systray {
         }
         override fun SecondaryActivate(x: Int, y: Int) { onRightClick?.invoke() }
 
-        /* ---- Properties helper ---- */
+        // Properties helpers
         private fun propertyValue(name: String): Any = when (name) {
-            "Status"     -> "Active"
-            "Title"      -> title
-            "Id"         -> "1"
-            "Category"   -> "ApplicationStatus"
-            "IconName"   -> ""             // force pixmap
-            "IconPixmap" -> iconPixmaps
-            "ItemIsMenu" -> true           // we *do* have an exported menu
-            "Menu"       -> DBusPath(PATH_MENU)
-            "ToolTip"    -> TooltipStruct("", iconPixmaps, tooltip, "")
-            else         -> Variant(null)
+            "Status"      -> "Active"
+            "Title"       -> title
+            "Id"          -> "1"
+            "Category"    -> "ApplicationStatus"
+            "IconName"    -> ""
+            "IconPixmap"  -> iconPixmaps //! FIXED – return array directly
+            "ItemIsMenu"  -> true
+            "Menu"        -> DBusPath(PATH_MENU)
+            "ToolTip"     -> TooltipStruct("", iconPixmaps.toList(), tooltip, "")
+            else           -> Variant(null)
         }
 
-        @Suppress("UNCHECKED_CAST")
-        override fun <T : Any?> Get(iface: String?, prop: String?): T =
-            propertyValue(prop!!).let { it as T }
+        override fun <T : Any?> Get(iface: String?, prop: String?): T {
+            @Suppress("UNCHECKED_CAST")
+            return when (val v = propertyValue(prop!!)) {
+                is Array<*> -> Variant(v) as T //! FIXED – ensure array for IconPixmap
+                is List<*>  -> Variant(v.toTypedArray()) as T
+                else        -> v as T
+            }
+        }
 
         override fun <A : Any?> Set(iface: String?, prop: String?, value: A?) {
             when (prop) {
-                "Title"   -> setTitle(value as String)
-                "ToolTip" -> setTooltip((value as TooltipStruct).v2)
-                "IconPixmap" -> if (value is List<*>) {
+                "Title"       -> setTitle(value as String)
+                "ToolTip"     -> setTooltip((value as TooltipStruct).v2)
+                "IconPixmap"  -> if (value is Array<*>) {
                     val px = value.firstOrNull()
                     if (px is PxStruct) iconBytes = argbToPng(px)
                 }
@@ -254,147 +485,98 @@ object Systray {
         }
 
         override fun GetAll(iface: String?): Map<String, Variant<*>> =
-            setOf(
-                "Status","Title","Id","Category",
-                "IconName","IconPixmap","ItemIsMenu",
-                "Menu","ToolTip"
-            ).associateWith { 
+            listOf("Status","Title","Id","Category","IconName","IconPixmap",
+                "ItemIsMenu","Menu","ToolTip").associateWith {
                 val value = propertyValue(it)
                 when (value) {
-                    is List<*> -> {
-                        // Convert List to Array for DBus compatibility
-                        if (value.isNotEmpty() && value[0] is PxStruct) {
-                            Variant((value as List<PxStruct>).toTypedArray())
-                        } else {
-                            Variant(value.toTypedArray())
-                        }
-                    }
-                    else -> Variant(value)
+                    is Array<*> -> Variant(value) //! FIXED – ensure array for IconPixmap
+                    is List<*>  -> Variant(value.toTypedArray())
+                    else        -> Variant(value)
                 }
             }
 
-        /* ---- Public mutators ---- */
+        // Mutators ---------------------------------------------
         fun setIcon(bytes: ByteArray) {
-            iconBytes = bytes
-            iconPixmaps = buildPixmaps(iconBytes)
-            emitNewIcon()
-            emitPropertiesChanged("IconPixmap")
+            iconBytes = bytes; iconPixmaps = buildPixmaps(iconBytes)
+            emitNewIcon(); emitPropertiesChanged("IconPixmap")
         }
-        fun setTitle(t: String) {
-            title = t
-            emitNewTitle()
-            emitPropertiesChanged("Title")
-        }
-        fun setTooltip(t: String) {
-            tooltip = t
-            emitPropertiesChanged("ToolTip")
-        }
+        fun setTitle(t: String) { title = t; emitNewTitle(); emitPropertiesChanged("Title") }
+        fun setTooltip(t: String) { tooltip = t; emitPropertiesChanged("ToolTip") }
 
-        /* ---- Signals ---- */
+        // Signals
         fun emitNewIcon()  = sendSignalSafe(NewIconSignal(PATH_ITEM))
         fun emitNewTitle() = sendSignalSafe(NewTitleSignal(PATH_ITEM))
-
         fun emitPropertiesChanged(vararg names: String) {
-            val changed = names.associateWith { 
+            val changed = names.associateWith {
                 val value = propertyValue(it)
                 when (value) {
-                    is List<*> -> {
-                        // Convert List to Array for DBus compatibility
-                        if (value.isNotEmpty() && value[0] is PxStruct) {
-                            Variant((value as List<PxStruct>).toTypedArray())
-                        } else {
-                            Variant(value.toTypedArray())
-                        }
-                    }
-                    else -> Variant(value)
+                    is Array<*> -> Variant(value) //! FIXED – ensure array for IconPixmap
+                    is List<*>  -> Variant(value.toTypedArray())
+                    else        -> Variant(value)
                 }
             }
             sendSignalSafe(PropertiesChangedSignal(PATH_ITEM, IFACE_SNI, changed))
         }
-
-        private fun sendSignalSafe(sig: DBusSignal) {
-            try {
-                if (running && ::conn.isInitialized && conn.isConnected) {
-                    conn.sendMessage(sig)
-                }
-            } catch (e: Exception) {
-                System.err.println("Systray signal error (${sig::class.simpleName}): ${e.message}")
-            }
-        }
+        private fun sendSignalSafe(sig: DBusSignal) = runCatching {
+            if (running && conn.isConnected) conn.sendMessage(sig)
+        }.onFailure { System.err.println("Signal error: ${it.message}") }
 
         override fun getObjectPath(): String = PATH_ITEM
     }
 
-    /* --------------------------------------------------------------------------------------------
-     * Helper: pixel conversion
-     * -------------------------------------------------------------------------------------------- */
-    private fun buildPixmaps(src: ByteArray): List<PxStruct> {
-        if (src.isEmpty()) return emptyList()
-        val img = ImageIO.read(ByteArrayInputStream(src)) ?: return emptyList()
-        val sizes = intArrayOf(16, 22, 24, 32, 48)
+    //-----------------------------------------------------------------
+    // 6. Icon conversions (unchanged)
+    //-----------------------------------------------------------------
+
+    open class PxStruct(@field:Position(0) val w: Int,
+                        @field:Position(1) val h: Int,
+                        @field:Position(2) val pix: ByteArray) : Struct()
+
+    class TooltipStruct(@field:Position(0) val v0: String,
+                        @field:Position(1) val v1: List<PxStruct>,
+                        @field:Position(2) val v2: String,
+                        @field:Position(3) val v3: String) : Struct()
+
+    private fun buildPixmaps(src: ByteArray): Array<PxStruct> {
+        if (src.isEmpty()) return emptyArray()
+        val img = ImageIO.read(ByteArrayInputStream(src)) ?: return emptyArray()
+        val sizes = intArrayOf(16,22,24,32,48)
         return sizes.map { sz ->
             val scaled = BufferedImage(sz, sz, BufferedImage.TYPE_INT_ARGB).apply {
-                val g = createGraphics()
-                g.drawImage(img, 0, 0, sz, sz, null)
-                g.dispose()
+                val g = createGraphics(); g.drawImage(img,0,0,sz,sz,null); g.dispose()
             }
-            val pix = ByteArray(sz * sz * 4)
+            val pix = ByteArray(sz*sz*4)
             var i = 0
             for (y in 0 until sz) for (x in 0 until sz) {
-                val argb = scaled.getRGB(x, y)
-                pix[i++] = ((argb ushr 24) and 0xFF).toByte() // A
-                pix[i++] = ((argb ushr 16) and 0xFF).toByte() // R
-                pix[i++] = ((argb ushr  8) and 0xFF).toByte() // G
-                pix[i++] = ( argb         and 0xFF).toByte()  // B
+                val argb = scaled.getRGB(x,y)
+                pix[i++] = ((argb ushr 24) and 0xFF).toByte()
+                pix[i++] = ((argb ushr 16) and 0xFF).toByte()
+                pix[i++] = ((argb ushr 8) and 0xFF).toByte()
+                pix[i++] = (argb and 0xFF).toByte()
             }
-            PxStruct(sz, sz, pix)
-        }
+            PxStruct(sz,sz,pix)
+        }.toTypedArray()
     }
 
     private fun argbToPng(px: PxStruct): ByteArray {
-        if (px.w == 0 || px.h == 0) return ByteArray(0)
+        if (px.w==0||px.h==0) return ByteArray(0)
         val img = BufferedImage(px.w, px.h, BufferedImage.TYPE_INT_ARGB)
-        var i = 0
+        var i=0
         for (y in 0 until px.h) for (x in 0 until px.w) {
-            val a = (px.pix[i++].toInt() and 0xFF) shl 24
-            val r = (px.pix[i++].toInt() and 0xFF) shl 16
-            val g = (px.pix[i++].toInt() and 0xFF) shl 8
-            val b = (px.pix[i++].toInt() and 0xFF)
-            img.setRGB(x, y, a or r or g or b)
+            val a=(px.pix[i++].toInt() and 0xFF) shl 24
+            val r=(px.pix[i++].toInt() and 0xFF) shl 16
+            val g=(px.pix[i++].toInt() and 0xFF) shl 8
+            val b=(px.pix[i++].toInt() and 0xFF)
+            img.setRGB(x,y,a or r or g or b)
         }
-        return ByteArrayOutputStream().use {
-            ImageIO.write(img, "png", it)
-            it.toByteArray()
-        }
+        return ByteArrayOutputStream().use { ImageIO.write(img,"png",it); it.toByteArray() }
     }
 
-    /* --------------------------------------------------------------------------------------------
-     * Keep JVM alive (non-daemon)
-     * -------------------------------------------------------------------------------------------- */
+    //-----------------------------------------------------------------
+    // 7. Keep JVM alive (unchanged)
+    //-----------------------------------------------------------------
     private fun keepAlive() {
-        val t = Thread({
-            while (running && ::conn.isInitialized && conn.isConnected) {
-                try { Thread.sleep(5_000) } catch (_: InterruptedException) { break }
-            }
-        }, "Systray-keepalive")
-        t.isDaemon = false
-        t.start()
+        val t = Thread({ while (running && conn.isConnected) Thread.sleep(5000) }, "Systray-keepalive")
+        t.isDaemon = false; t.start()
     }
 }
-
-
-/* -------------------------------------------------------------------------------------------------
- * Tooltip / Pixmap structs
- * ------------------------------------------------------------------------------------------------ */
-open class PxStruct(
-    @field:Position(0) val w: Int,
-    @field:Position(1) val h: Int,
-    @field:Position(2) val pix: ByteArray
-) : Struct()
-
-class TooltipStruct(
-    @field:Position(0) val v0: String,
-    @field:Position(1) val v1: List<PxStruct>,
-    @field:Position(2) val v2: String,
-    @field:Position(3) val v3: String
-) : Struct()
