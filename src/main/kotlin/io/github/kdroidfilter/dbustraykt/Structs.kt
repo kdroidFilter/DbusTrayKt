@@ -36,6 +36,7 @@ data class MenuEntry(
     val id: Int,
     var label: String,
     var enabled: Boolean = true,
+    var visibleSet: Boolean = false,
     var visible: Boolean = true,
     var checkable: Boolean = false,
     var checked: Boolean = false,

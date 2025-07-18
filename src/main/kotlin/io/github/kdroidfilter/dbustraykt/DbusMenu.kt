@@ -1,4 +1,3 @@
-// DbusMenu.kt (corrected to avoid setting toggle properties for root menu item)
 package io.github.kdroidfilter.dbustraykt
 
 import org.freedesktop.dbus.Struct
@@ -59,7 +58,7 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
     ): Int {
         val id = nextId++
         lock.write {
-            items[id] = MenuEntry(id, label, true, true, checkable, checked, false,
+            items[id] = MenuEntry(id, label, true, false, true, checkable, checked, false,
                 onClick = onClick, parent = parent)
             items[parent]?.children?.add(id)
             bumpVersionLocked()
@@ -81,7 +80,7 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
 
     fun setLabel(id: Int, label: String) = mutate(id) { it.label = label ; listOf("label") }
     fun setEnabled(id: Int, enabled: Boolean) = mutate(id) { it.enabled = enabled ; listOf("enabled") }
-    fun setVisible(id: Int, visible: Boolean) = mutate(id) { it.visible = visible ; listOf("visible") }
+    fun setVisible(id: Int, visible: Boolean) = mutate(id) { it.visible = visible ; it.visibleSet = true ; listOf("visible") }
     fun setChecked(id: Int, checked: Boolean) = mutate(id) {
         if (it.checkable) { it.checked = checked ; listOf("toggle-state") } else emptyList() }
 
@@ -166,7 +165,9 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
         if (e.id != ROOT_ID) {
             p["label"] = Variant(e.label)
             p["enabled"] = Variant(e.enabled)
-            p["visible"] = Variant(e.visible)
+            if (e.visibleSet) {
+                p["visible"] = Variant(e.visible)
+            }
         }
 
         // Toggle properties
@@ -217,12 +218,12 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
         require(iface == IFACE_MENU) { "Unknown interface: $iface" }
         @Suppress("UNCHECKED_CAST")
         return when (prop) {
-            "Version"       -> UInt32(menuVersion.toLong())
-            "Status"        -> "normal"
-            "TextDirection" -> "ltr"
-            "IconThemePath" -> emptyArray<String>()
+            "Version"       -> UInt32(menuVersion.toLong()) as T
+            "Status"        -> "normal" as T
+            "TextDirection" -> "ltr" as T
+            "IconThemePath" -> emptyArray<String>() as T
             else            -> throw IllegalArgumentException("Unknown property: $prop")
-        } as T
+        }
     }
 
     override fun <A : Any?> Set(iface: String?, prop: String?, value: A?) {

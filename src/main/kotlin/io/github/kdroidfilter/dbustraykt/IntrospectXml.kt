@@ -1,4 +1,3 @@
-// IntrospectXml.kt (added missing signals to itemXml to match Go introspection data)
 package io.github.kdroidfilter.dbustraykt
 
 object IntrospectXml {
@@ -130,7 +129,6 @@ object IntrospectXml {
                     <signal name="NewTitle"/>
                     <signal name="NewAttentionIcon"/>
                     <signal name="NewOverlayIcon"/>
-                    <signal name="NewToolTip"/>
                     <signal name="NewStatus">
                         <arg name="status" type="s"/>
                     </signal>
@@ -138,15 +136,30 @@ object IntrospectXml {
                         <arg name="icon_theme_path" type="s" direction="out"/>
                     </signal>
                     <signal name="NewMenu"/>
-                    <property name="Status" type="s" access="read"/>
-                    <property name="Title" type="s" access="readwrite"/>
-                    <property name="Id" type="s" access="read"/>
                     <property name="Category" type="s" access="read"/>
+                    <property name="Id" type="s" access="read"/>
+                    <property name="Title" type="s" access="read"/>
+                    <property name="Status" type="s" access="read"/>
+                    <property name="WindowId" type="i" access="read"/>
+                    <property name="IconThemePath" type="s" access="read"/>
                     <property name="IconName" type="s" access="read"/>
-                    <property name="IconPixmap" type="a(iiay)" access="readwrite"/>
+                    <property name="IconPixmap" type="a(iiay)" access="read">
+                        <annotation name="org.qtproject.QtDBus.QtTypeName" value="KDbusImageVector"/>
+                    </property>
+                    <property name="OverlayIconName" type="s" access="read"/>
+                    <property name="OverlayIconPixmap" type="a(iiay)" access="read">
+                        <annotation name="org.qtproject.QtDBus.QtTypeName" value="KDbusImageVector"/>
+                    </property>
+                    <property name="AttentionIconName" type="s" access="read"/>
+                    <property name="AttentionIconPixmap" type="a(iiay)" access="read">
+                        <annotation name="org.qtproject.QtDBus.QtTypeName" value="KDbusImageVector"/>
+                    </property>
+                    <property name="AttentionMovieName" type="s" access="read"/>
                     <property name="ItemIsMenu" type="b" access="read"/>
                     <property name="Menu" type="o" access="read"/>
-                    <property name="ToolTip" type="(sa(iiay)ss)" access="readwrite"/>
+                    <property name="ToolTip" type="(sa(iiay)ss)" access="read">
+                        <annotation name="org.qtproject.QtDBus.QtTypeName" value="KDbusToolTipStruct"/>
+                    </property>
                 </interface>
             </node>
             """.trimIndent()
