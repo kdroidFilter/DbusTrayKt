@@ -2,14 +2,12 @@ package io.github.kdroidfilter.dbustraykt
 
 import org.freedesktop.dbus.connections.impl.DBusConnection
 import org.freedesktop.dbus.connections.impl.DBusConnectionBuilder
-import java.util.concurrent.atomic.AtomicInteger
 
 object Systray {
     internal lateinit var conn: DBusConnection
     lateinit var itemImpl: StatusNotifierItemImpl
     private lateinit var menuImpl: DbusMenu
     @Volatile internal var running = false
-    private val idSrc = AtomicInteger(0)
 
     @JvmStatic fun run(
         iconBytes: ByteArray,
@@ -69,17 +67,18 @@ object Systray {
     @JvmStatic fun setTooltip(t: String) = itemImpl.setTooltip(t)
 
     @JvmStatic fun addMenuItem(label: String, onClick: (() -> Unit)? = null): Int =
-        menuImpl.addItem(idSrc.incrementAndGet(), label, onClick = onClick)
+        menuImpl.addItem(label, onClick = onClick)
 
     @JvmStatic fun addMenuItemCheckbox(label: String, checked: Boolean = false,
                                        onClick: (() -> Unit)? = null): Int =
-        menuImpl.addItem(idSrc.incrementAndGet(), label, checkable = true, checked = checked,
-            onClick = onClick)
+        menuImpl.addItem(label, checkable = true, checked = checked, onClick = onClick)
 
-    @JvmStatic fun addSeparator(): Int = menuImpl.addSeparator(idSrc.incrementAndGet())
+    @JvmStatic fun addSeparator(): Int = menuImpl.addSeparator()
 
     @JvmStatic fun setMenuItemLabel(id: Int, label: String) = menuImpl.setLabel(id, label)
     @JvmStatic fun setMenuItemEnabled(id: Int, enabled: Boolean) = menuImpl.setEnabled(id, enabled)
     @JvmStatic fun setMenuItemChecked(id: Int, checked: Boolean) = menuImpl.setChecked(id, checked)
     @JvmStatic fun setMenuItemVisible(id: Int, visible: Boolean) = menuImpl.setVisible(id, visible)
+
+    @JvmStatic fun resetMenu() = menuImpl.resetMenu()
 }

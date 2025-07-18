@@ -42,32 +42,39 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
     private val lock = ReentrantReadWriteLock()
     private val items = LinkedHashMap<Int, MenuEntry>()
     private var menuVersion: UInt = 1u
+    private var nextId = 1
 
     init {
-        items[ROOT_ID] = MenuEntry(ROOT_ID, label = "root", visible = false)
+        // Initialize root menu item - CRITICAL: must have correct structure
+        items[ROOT_ID] = MenuEntry(ROOT_ID, label = "", visible = false)
     }
 
     fun addItem(
-        id: Int,
         label: String,
         checkable: Boolean = false,
         checked: Boolean = false,
         parent: Int = ROOT_ID,
         onClick: (() -> Unit)? = null,
     ): Int {
+        val id = nextId++
         lock.write {
             items[id] = MenuEntry(id, label, true, true, checkable, checked, false,
                 onClick = onClick, parent = parent)
             items[parent]?.children?.add(id)
+            bumpVersionLocked()
         }
+        emitLayoutUpdated()
         return id
     }
 
-    fun addSeparator(id: Int, parent: Int = ROOT_ID): Int {
+    fun addSeparator(parent: Int = ROOT_ID): Int {
+        val id = nextId++
         lock.write {
             items[id] = MenuEntry(id, label = "", enabled = true, sep = true, parent = parent)
             items[parent]?.children?.add(id)
+            bumpVersionLocked()
         }
+        emitLayoutUpdated()
         return id
     }
 
@@ -80,7 +87,8 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
     fun resetMenu() {
         lock.write {
             items.clear()
-            items[ROOT_ID] = MenuEntry(ROOT_ID, label = "root", visible = false)
+            items[ROOT_ID] = MenuEntry(ROOT_ID, label = "", visible = false)
+            nextId = 1
             bumpVersionLocked()
         }
         emitLayoutUpdated()
@@ -95,7 +103,7 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
     override fun GetGroupProperties(ids: Array<Int>, propertyNames: Array<String>): Array<MenuProperty> =
         lock.read {
             ids.mapNotNull { id ->
-                items[id]?.let { MenuProperty(it.id, propsLocked(it)) }  // Ignore propertyNames to match Go (return all)
+                items[id]?.let { MenuProperty(it.id, propsLocked(it)) }
             }.toTypedArray()
         }
 
@@ -119,45 +127,65 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
 
     private fun handleEvent(id: Int, eventID: String) {
         if (eventID != "clicked") return
-        val entryCopy: MenuEntry?
-        lock.write {
+        val onClick: (() -> Unit)?
+        lock.read {
             val e = items[id] ?: return
             if (e.sep) return
             println("Menu item clicked: id=$id, label=${e.label}")
-            entryCopy = e.copy()
+            onClick = e.onClick
         }
-        entryCopy?.onClick?.invoke()
+        onClick?.invoke()
     }
 
     private fun buildLayoutNodeLocked(id: Int, depth: Int): LayoutNode {
         val e = items[id] ?: return LayoutNode(0, emptyMap(), emptyArray())
-        val childDepth = if (depth > 0) depth - 1 else depth
-        val childVariants: Array<Variant<*>> = if (depth == 0) emptyArray() else {
-            e.children.map { Variant(buildLayoutNodeLocked(it, childDepth)) as Variant<*> }.toTypedArray()
+
+        val childVariants: Array<Variant<*>> = if (depth == 0 || e.children.isEmpty()) {
+            emptyArray()
+        } else {
+            val childDepth = if (depth > 0) depth - 1 else depth
+            e.children.map { childId ->
+                Variant(buildLayoutNodeLocked(childId, childDepth))
+            }.toTypedArray()
         }
+
         return LayoutNode(e.id, propsLocked(e), childVariants)
     }
 
     private fun propsLocked(e: MenuEntry): Map<String, Variant<*>> {
         val p = LinkedHashMap<String, Variant<*>>()
-        fun put(key: String, v: Any) { p[key] = Variant(v) }
 
+        // CRITICAL: Properties must match exactly what Go sends
         if (e.sep) {
-            put("type", "separator")
+            p["type"] = Variant("separator")
             return p
         }
+
+        // For root item, don't send label/enabled/visible
         if (e.id != ROOT_ID) {
-            put("label", e.label)
-            put("enabled", e.enabled)
-            put("visible", e.visible)
+            p["label"] = Variant(e.label)
+            p["enabled"] = Variant(e.enabled)
+            p["visible"] = Variant(e.visible)
         }
-        put("toggle-type", if (e.checkable) "checkmark" else "")
-        put("toggle-state", if (e.checkable && e.checked) 1 else 0)
-        if (e.id != ROOT_ID && e.children.isNotEmpty()) put("children-display", "submenu")
+
+        // Toggle properties
+        if (e.checkable) {
+            p["toggle-type"] = Variant("checkmark")
+            p["toggle-state"] = Variant(if (e.checked) 1 else 0)
+        } else {
+            p["toggle-type"] = Variant("")
+            p["toggle-state"] = Variant(0)
+        }
+
+        // Children display
+        if (e.id != ROOT_ID && e.children.isNotEmpty()) {
+            p["children-display"] = Variant("submenu")
+        }
+
         return p
     }
 
-    private fun mutate(id: Int, op: (MenuEntry) -> List<String>): Unit {
+    private fun mutate(id: Int, op: (MenuEntry) -> List<String>) {
         val changedKeys: List<String>
         lock.write {
             val e = items[id] ?: return
@@ -185,18 +213,20 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
     }
 
     override fun <T : Any?> Get(iface: String?, prop: String?): T {
-        require(iface == IFACE_MENU)
+        require(iface == IFACE_MENU) { "Unknown interface: $iface" }
         @Suppress("UNCHECKED_CAST")
         return when (prop) {
             "Version"       -> UInt32(menuVersion.toLong())
             "Status"        -> "normal"
             "TextDirection" -> "ltr"
             "IconThemePath" -> emptyArray<String>()
-            else             -> Variant(null)
+            else            -> throw IllegalArgumentException("Unknown property: $prop")
         } as T
     }
 
-    override fun <A : Any?> Set(iface: String?, prop: String?, value: A?) {}
+    override fun <A : Any?> Set(iface: String?, prop: String?, value: A?) {
+        // Menu properties are read-only
+    }
 
     override fun GetAll(iface: String?): Map<String, Variant<*>> = mapOf(
         "Version" to Variant(UInt32(menuVersion.toLong())),
