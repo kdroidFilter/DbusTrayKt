@@ -149,12 +149,11 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
             put("type", "separator")
             return p
         }
-        if (e.id == ROOT_ID) {
-            put("children-display", "submenu")
+        if (e.id != ROOT_ID) {  // Skip unnecessary props for root
+            put("label", e.label)
+            put("enabled", e.enabled)
+            put("visible", e.visible)
         }
-        put("label", e.label)
-        put("enabled", e.enabled)
-        put("visible", e.visible)
         if (e.checkable) {
             put("toggle-type", "checkmark")
             put("toggle-state", if (e.checked) 1 else 0)
