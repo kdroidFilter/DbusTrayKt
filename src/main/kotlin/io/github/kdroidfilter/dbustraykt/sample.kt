@@ -22,8 +22,9 @@ fun main() {
     val helloId = Systray.addMenuItem("Say Hello") {
         println("Hello from tray menu")
     }
-    Systray.addMenuItemCheckbox("Enable Feature", checked = false) { checked ->
-        println("Feature toggled: $checked")
+    Systray.addMenuItemCheckbox("Enable Feature", checked = false) {
+        println("Feature toggled")
+
     }
     Systray.addSeparator()
     Systray.addMenuItem("Quit") {

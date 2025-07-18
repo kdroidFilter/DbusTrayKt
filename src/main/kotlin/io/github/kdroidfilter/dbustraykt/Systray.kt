@@ -16,12 +16,12 @@ import org.freedesktop.dbus.types.Variant
 import java.awt.image.BufferedImage
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
-import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.ReentrantReadWriteLock
 import javax.imageio.ImageIO
 import kotlin.concurrent.read
 import kotlin.concurrent.write
+import kotlin.system.exitProcess
 
 private const val ROOT_ID = 0
 internal const val PATH_ITEM = "/StatusNotifierItem"
@@ -39,7 +39,6 @@ data class MenuEntry(
     var sep: Boolean = false,
     val children: MutableList<Int> = mutableListOf(),
     val onClick: (() -> Unit)? = null,
-    val onToggle: ((Boolean) -> Unit)? = null,
     val parent: Int = ROOT_ID
 )
 
@@ -95,12 +94,11 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
         checkable: Boolean = false,
         checked: Boolean = false,
         onClick: (() -> Unit)? = null,
-        onToggle: ((Boolean) -> Unit)? = null,
         parent: Int = ROOT_ID,
     ): Int {
         lock.write {
             items[id] = MenuEntry(id, label, true, true, checkable, checked, false,
-                onClick = onClick, onToggle = onToggle, parent = parent)
+                onClick = onClick, parent = parent)
             items[parent]?.children?.add(id)
             bumpVersionLocked()
         }
@@ -142,7 +140,7 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
     override fun GetGroupProperties(ids: Array<Int>, propertyNames: Array<String>): Array<MenuProperty> =
         lock.read {
             ids.mapNotNull { id ->
-                items[id]?.let { MenuProperty(it.id, propsLocked(it, propertyNames.toList())) }
+                items[id]?.let { MenuProperty(it.id, propsLocked(it)) }  // Ignore propertyNames to match Go (return all)
             }.toTypedArray()
         }
 
@@ -166,22 +164,14 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
 
     private fun handleEvent(id: Int, eventID: String) {
         if (eventID != "clicked") return
-        var toggleChanged = false
         val entryCopy: MenuEntry?
         lock.write {
             val e = items[id] ?: return
             if (e.sep) return
             println("Menu item clicked: id=$id, label=${e.label}")
-            if (e.checkable) {
-                e.checked = !e.checked
-                toggleChanged = true
-            }
             entryCopy = e.copy()
         }
         entryCopy?.onClick?.invoke()
-        if (toggleChanged) {
-            entryCopy?.onToggle?.invoke(entryCopy.checked)
-        }
     }
 
     private fun buildLayoutNodeLocked(id: Int, depth: Int): LayoutNode {
@@ -192,9 +182,9 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
         return LayoutNode(e.id, propsLocked(e), childVariants)
     }
 
-    private fun propsLocked(e: MenuEntry, filter: List<String> = emptyList()): Map<String, Variant<*>> {
+    private fun propsLocked(e: MenuEntry): Map<String, Variant<*>> {
         val p = LinkedHashMap<String, Variant<*>>()
-        fun put(key: String, v: Any) { if (filter.isEmpty() || key in filter) p[key] = Variant(v) }
+        fun put(key: String, v: Any) { p[key] = Variant(v) }
 
         if (e.sep) {
             put("type", "separator")
@@ -232,7 +222,6 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
     internal fun emitLayoutUpdated() {
         runCatching {
             conn.sendMessage(LayoutUpdatedSignal(objectPath, UInt32(menuVersion.toLong()), ROOT_ID))
-            Systray.itemImpl.emitNewMenu()
         }.onFailure { System.err.println("emitLayoutUpdated(): ${it.message}") }
     }
 
@@ -371,7 +360,6 @@ object Systray {
     private lateinit var conn: DBusConnection
     lateinit var itemImpl: StatusNotifierItemImpl
     private lateinit var menuImpl: DbusMenu
-    private val executor = Executors.newSingleThreadExecutor()
     @Volatile private var running = false
     private val idSrc = AtomicInteger(0)
 
@@ -413,8 +401,6 @@ object Systray {
         }.onFailure {
             System.err.println("Failed to register with StatusNotifierWatcher: ${it.message}. Continuing without watcher.")
         }
-
-        keepAlive()
     }
 
     @JvmStatic fun quit() {
@@ -428,7 +414,6 @@ object Systray {
                 conn.close()
             }
         }.onFailure { System.err.println("Systray.quit(): ${it.message}") }
-        executor.shutdownNow()
     }
 
     @JvmStatic fun setIcon(bytes: ByteArray) = itemImpl.setIcon(bytes)
@@ -439,9 +424,9 @@ object Systray {
         menuImpl.addItem(idSrc.incrementAndGet(), label, onClick = onClick)
 
     @JvmStatic fun addMenuItemCheckbox(label: String, checked: Boolean = false,
-                                       onToggle: ((Boolean) -> Unit)? = null): Int =
+                                       onClick: (() -> Unit)? = null): Int =
         menuImpl.addItem(idSrc.incrementAndGet(), label, checkable = true, checked = checked,
-            onToggle = onToggle)
+            onClick = onClick)
 
     @JvmStatic fun addSeparator(): Int = menuImpl.addSeparator(idSrc.incrementAndGet())
 
@@ -667,10 +652,5 @@ object Systray {
             img.setRGB(x, y, a or r or g or b)
         }
         return ByteArrayOutputStream().use { ImageIO.write(img, "png", it); it.toByteArray() }
-    }
-
-    private fun keepAlive() {
-        val t = Thread({ while (running && conn.isConnected) Thread.sleep(5000) }, "Systray-keepalive")
-        t.isDaemon = false; t.start()
     }
 }
