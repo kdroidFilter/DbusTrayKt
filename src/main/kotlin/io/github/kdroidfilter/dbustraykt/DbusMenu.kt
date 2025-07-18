@@ -1,3 +1,4 @@
+// DbusMenu.kt (corrected to avoid setting toggle properties for root menu item)
 package io.github.kdroidfilter.dbustraykt
 
 import org.freedesktop.dbus.Struct
@@ -172,7 +173,7 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
         if (e.checkable) {
             p["toggle-type"] = Variant("checkmark")
             p["toggle-state"] = Variant(if (e.checked) 1 else 0)
-        } else {
+        } else if (e.id != ROOT_ID) {
             p["toggle-type"] = Variant("")
             p["toggle-state"] = Variant(0)
         }

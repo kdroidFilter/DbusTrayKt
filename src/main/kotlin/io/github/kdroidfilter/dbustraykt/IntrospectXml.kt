@@ -1,3 +1,4 @@
+// IntrospectXml.kt (added missing signals to itemXml to match Go introspection data)
 package io.github.kdroidfilter.dbustraykt
 
 object IntrospectXml {
@@ -71,6 +72,10 @@ object IntrospectXml {
                     <arg name="revision" type="u"/>
                     <arg name="parent" type="i"/>
                 </signal>
+                <signal name="ItemActivationRequested">
+                    <arg name="id" type="i"/>
+                    <arg name="timestamp" type="u"/>
+                </signal>
                 <property name="Version" type="u" access="read"/>
                 <property name="TextDirection" type="s" access="read"/>
                 <property name="Status" type="s" access="read"/>
@@ -123,6 +128,15 @@ object IntrospectXml {
                     </method>
                     <signal name="NewIcon"/>
                     <signal name="NewTitle"/>
+                    <signal name="NewAttentionIcon"/>
+                    <signal name="NewOverlayIcon"/>
+                    <signal name="NewToolTip"/>
+                    <signal name="NewStatus">
+                        <arg name="status" type="s"/>
+                    </signal>
+                    <signal name="NewIconThemePath">
+                        <arg name="icon_theme_path" type="s" direction="out"/>
+                    </signal>
                     <signal name="NewMenu"/>
                     <property name="Status" type="s" access="read"/>
                     <property name="Title" type="s" access="readwrite"/>
