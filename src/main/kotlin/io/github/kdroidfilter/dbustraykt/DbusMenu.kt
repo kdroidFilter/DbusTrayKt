@@ -52,8 +52,8 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
         label: String,
         checkable: Boolean = false,
         checked: Boolean = false,
-        onClick: (() -> Unit)? = null,
         parent: Int = ROOT_ID,
+        onClick: (() -> Unit)? = null,
     ): Int {
         lock.write {
             items[id] = MenuEntry(id, label, true, true, checkable, checked, false,

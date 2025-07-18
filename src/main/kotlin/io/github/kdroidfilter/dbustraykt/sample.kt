@@ -7,6 +7,7 @@ import javax.imageio.ImageIO
 import kotlin.system.exitProcess
 
 fun main() {
+    startDBusMonitor("dbus_log.txt")  // Remplacez par le fichier que vous fournirez
     val iconBytes = generateIcon()
 
     Systray.run(
@@ -61,4 +62,25 @@ private fun generateIcon(): ByteArray {
         ImageIO.write(img, "png", it)
         it.toByteArray()
     }
+}
+
+fun startDBusMonitor(logFile: String) {
+    Thread {
+        try {
+            val process = ProcessBuilder(
+                "dbus-monitor", "--session",
+                "interface=org.kde.StatusNotifierItem,path=/StatusNotifierItem",
+                "interface=com.canonical.dbusmenu,path=/StatusNotifierMenu",
+                "type=signal",  // Optionnel: filtrer sur les signaux uniquement, pour encore plus court
+                "type=method_call"  // Et les appels de méthodes
+            )
+                .redirectOutput(java.io.File(logFile))
+                .redirectErrorStream(true)
+                .start()
+            process.waitFor()
+            println("dbus-monitor stopped.")
+        } catch (e: Exception) {
+            System.err.println("Error running dbus-monitor: ${e.message}")
+        }
+    }.start()
 }
