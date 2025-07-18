@@ -75,6 +75,12 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
     ) : DBusSignal(path, IFACE_MENU, "ItemsPropertiesUpdated", updated, removed), DBusInterface {
         override fun getObjectPath(): String = path
     }
+
+    class PropertiesChangedSignal(path: String, iface: String, changed: Map<String, Variant<*>>) :
+        DBusSignal(path, "org.freedesktop.DBus.Properties", "PropertiesChanged", iface, changed, emptyArray<String>()), DBusInterface {
+        override fun getObjectPath(): String = path
+    }
+
     private val lock = ReentrantReadWriteLock()
     private val items = LinkedHashMap<Int, MenuEntry>()
     private var menuVersion: UInt = 1u
@@ -96,9 +102,6 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
             items[id] = MenuEntry(id, label, true, true, checkable, checked, false,
                 onClick = onClick, onToggle = onToggle, parent = parent)
             items[parent]?.children?.add(id)
-            if (items[parent]?.children?.isNotEmpty() == true) {
-                items[parent]?.let { emitItemsPropertiesUpdated(listOf(parent), listOf("children-display")) }
-            }
             bumpVersionLocked()
         }
         emitLayoutUpdated()
@@ -178,7 +181,6 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
         entryCopy?.onClick?.invoke()
         if (toggleChanged) {
             entryCopy?.onToggle?.invoke(entryCopy.checked)
-            emitItemsPropertiesUpdated(listOf(id), listOf("toggle-state"))
         }
     }
 
@@ -219,27 +221,25 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
             changedKeys = op(e)
             if (changedKeys.isNotEmpty()) bumpVersionLocked()
         }
-        if (changedKeys.isNotEmpty()) emitItemsPropertiesUpdated(listOf(id), changedKeys)
+        if (changedKeys.isNotEmpty()) emitLayoutUpdated()
     }
 
-    private fun bumpVersionLocked() { menuVersion++ }
+    private fun bumpVersionLocked() {
+        menuVersion++
+        emitMenuPropertiesChanged(mapOf("Version" to Variant(UInt32(menuVersion.toLong()))))
+    }
 
     internal fun emitLayoutUpdated() {
         runCatching {
             conn.sendMessage(LayoutUpdatedSignal(objectPath, UInt32(menuVersion.toLong()), ROOT_ID))
+            Systray.itemImpl.emitNewMenu()
         }.onFailure { System.err.println("emitLayoutUpdated(): ${it.message}") }
     }
 
-    internal fun emitItemsPropertiesUpdated(ids: List<Int>, keys: List<String>) {
-        val updates = mutableListOf<MenuProperty>()
-        lock.read {
-            ids.forEach { id ->
-                items[id]?.let { updates += MenuProperty(id, propsLocked(it, keys)) }
-            }
-        }
+    fun emitMenuPropertiesChanged(changed: Map<String, Variant<*>>) {
         runCatching {
-            conn.sendMessage(ItemsPropertiesUpdatedSignal(objectPath, updates.toTypedArray(), emptyArray()))
-        }.onFailure { System.err.println("emitItemsPropertiesUpdated(): ${it.message}") }
+            conn.sendMessage(PropertiesChangedSignal(objectPath, IFACE_MENU, changed))
+        }.onFailure { System.err.println("emitMenuPropertiesChanged(): ${it.message}") }
     }
 
     override fun <T : Any?> Get(iface: String?, prop: String?): T {
@@ -369,7 +369,7 @@ interface StatusNotifierWatcher : DBusInterface {
 
 object Systray {
     private lateinit var conn: DBusConnection
-    private lateinit var itemImpl: StatusNotifierItemImpl
+    lateinit var itemImpl: StatusNotifierItemImpl
     private lateinit var menuImpl: DbusMenu
     private val executor = Executors.newSingleThreadExecutor()
     @Volatile private var running = false
@@ -458,7 +458,7 @@ object Systray {
         fun Scroll(delta: Int, orientation: String)
     }
 
-    private class StatusNotifierItemImpl(
+    class StatusNotifierItemImpl(
         private var iconBytes: ByteArray,
         private var title: String,
         private var tooltip: String,
@@ -477,10 +477,6 @@ object Systray {
             override fun getObjectPath(): String = path
         }
         class NewMenuSignal(path: String) : DBusSignal(path, IFACE_SNI, "NewMenu"), DBusInterface {
-            override fun getObjectPath(): String = path
-        }
-        class PropertiesChangedSignal(path: String, iface: String, changed: Map<String, Variant<*>>) :
-            DBusSignal(path, "org.freedesktop.DBus.Properties", "PropertiesChanged", arrayOf(iface, changed, emptyList<String>())), DBusInterface {
             override fun getObjectPath(): String = path
         }
 
@@ -560,7 +556,7 @@ object Systray {
                     else        -> Variant(value)
                 }
             }
-            sendSignalSafe(PropertiesChangedSignal(PATH_ITEM, IFACE_SNI, changed))
+            sendSignalSafe(DbusMenu.PropertiesChangedSignal(PATH_ITEM, IFACE_SNI, changed))
         }
         private fun sendSignalSafe(sig: DBusSignal) = runCatching {
             if (running && conn.isConnected) conn.sendMessage(sig)
