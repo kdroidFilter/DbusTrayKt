@@ -3,7 +3,6 @@ package io.github.kdroidfilter.dbustraykt
 import org.freedesktop.dbus.connections.impl.DBusConnection
 import org.freedesktop.dbus.connections.impl.DBusConnectionBuilder
 import java.util.concurrent.atomic.AtomicInteger
-import kotlin.system.exitProcess
 
 object Systray {
     internal lateinit var conn: DBusConnection

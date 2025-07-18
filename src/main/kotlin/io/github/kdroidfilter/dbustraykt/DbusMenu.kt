@@ -134,9 +134,10 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
     }
 
     private fun buildLayoutNodeLocked(id: Int, depth: Int): LayoutNode {
-        val e = items[id] ?: items[ROOT_ID]!!
+        val e = items[id] ?: return LayoutNode(0, emptyMap(), emptyArray())
+        val childDepth = if (depth > 0) depth - 1 else depth
         val childVariants: Array<Variant<*>> = if (depth == 0) emptyArray() else {
-            e.children.map { Variant(buildLayoutNodeLocked(it, depth - 1)) as Variant<*> }.toTypedArray()
+            e.children.map { Variant(buildLayoutNodeLocked(it, childDepth)) as Variant<*> }.toTypedArray()
         }
         return LayoutNode(e.id, propsLocked(e), childVariants)
     }
