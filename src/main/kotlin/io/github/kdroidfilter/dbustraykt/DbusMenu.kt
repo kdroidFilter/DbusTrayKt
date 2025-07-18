@@ -59,19 +59,15 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
             items[id] = MenuEntry(id, label, true, true, checkable, checked, false,
                 onClick = onClick, parent = parent)
             items[parent]?.children?.add(id)
-            bumpVersionLocked()
         }
-        emitLayoutUpdated()
         return id
     }
 
     fun addSeparator(id: Int, parent: Int = ROOT_ID): Int {
         lock.write {
-            items[id] = MenuEntry(id, label = "", enabled = false, sep = true, parent = parent)
+            items[id] = MenuEntry(id, label = "", enabled = true, sep = true, parent = parent)
             items[parent]?.children?.add(id)
-            bumpVersionLocked()
         }
-        emitLayoutUpdated()
         return id
     }
 
@@ -150,16 +146,14 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
             put("type", "separator")
             return p
         }
-        if (e.id != ROOT_ID) {  // Skip unnecessary props for root
+        if (e.id != ROOT_ID) {
             put("label", e.label)
             put("enabled", e.enabled)
             put("visible", e.visible)
         }
-        if (e.checkable) {
-            put("toggle-type", "checkmark")
-            put("toggle-state", if (e.checked) 1 else 0)
-        }
-        if (e.children.isNotEmpty()) put("children-display", "submenu")
+        put("toggle-type", if (e.checkable) "checkmark" else "")
+        put("toggle-state", if (e.checkable && e.checked) 1 else 0)
+        if (e.id != ROOT_ID && e.children.isNotEmpty()) put("children-display", "submenu")
         return p
     }
 
