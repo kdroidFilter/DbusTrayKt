@@ -7,6 +7,7 @@ import javax.imageio.ImageIO
 import kotlin.system.exitProcess
 
 fun main() {
+
     startDBusMonitor("dbus_log.txt")
     val iconBytes = generateIcon()
 
@@ -15,8 +16,7 @@ fun main() {
         title = "Tray Demo",
         tooltip = "Systray demo (Kotlin/DBus)",
         onClick = { println("Primary click") },
-        onDblClick = { println("Double click") },
-        onRightClick = { println("Right click") }
+
     )
 
     // Build a minimal functional menu
@@ -33,15 +33,6 @@ fun main() {
         exitProcess(0)
     }
 
-    println("Tray running. Press ENTER to update label; 'q'+ENTER to quit.")
-    while (true) {
-        val line = readlnOrNull() ?: break
-        if (line.equals("q", ignoreCase = true)) {
-            Systray.quit()
-            break
-        }
-        Systray.setMenuItemLabel(helloId, "Hello (${System.currentTimeMillis()})")
-    }
 }
 
 /* ------------------------------------------------------------------------------------------------

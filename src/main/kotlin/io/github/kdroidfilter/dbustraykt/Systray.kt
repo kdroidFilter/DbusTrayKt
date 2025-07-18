@@ -20,29 +20,29 @@ object Systray {
         if (running) return
         running = true
 
-        // 1. Connection
+// 1. Connection
         conn = DBusConnectionBuilder.forSessionBus().build()
 
-        // 2. Objects
+// 2. Objects
         itemImpl = StatusNotifierItemImpl(iconBytes, title, tooltip, onClick, onDblClick, onRightClick)
         menuImpl = DbusMenu(conn, PATH_MENU)
 
-        // 3. Export objects with all interfaces
+// 3. Export objects with all interfaces
         conn.exportObject(PATH_ITEM, itemImpl) // Exports StatusNotifierItem, Properties, and Introspectable
         conn.exportObject(PATH_MENU, menuImpl) // Exports DbusMenuMinimal, Properties, and Introspectable
 
-        // 4. Unique name
+// 4. Unique name
         val uniqueName = "org.kde.StatusNotifierItem-${ProcessHandle.current().pid()}-1"
         conn.requestBusName(uniqueName)
 
-        // 5. Register watcher
+// 5. Register watcher
         runCatching {
             val watcher = conn.getRemoteObject(
                 "org.kde.StatusNotifierWatcher",
                 "/StatusNotifierWatcher",
                 StatusNotifierWatcher::class.java
             )
-            watcher.RegisterStatusNotifierItem(PATH_ITEM)
+            watcher.RegisterStatusNotifierItem(uniqueName)
             println("Successfully registered with StatusNotifierWatcher")
         }.onFailure {
             System.err.println("Failed to register with StatusNotifierWatcher: ${it.message}. Continuing without watcher.")
