@@ -34,11 +34,6 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
         override fun getObjectPath(): String = path
     }
 
-    class PropertiesChangedSignal(path: String, iface: String, changed: Map<String, Variant<*>>) :
-        DBusSignal(path, "org.freedesktop.DBus.Properties", "PropertiesChanged", iface, changed, emptyArray<String>()), DBusInterface {
-        override fun getObjectPath(): String = path
-    }
-
     private val lock = ReentrantReadWriteLock()
     private val items = LinkedHashMap<Int, MenuEntry>()
     private var menuVersion: UInt = 1u
@@ -46,7 +41,7 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
 
     init {
         // Initialize root menu item - CRITICAL: must have correct structure
-        items[ROOT_ID] = MenuEntry(ROOT_ID, label = "", visible = false)
+        items[ROOT_ID] = MenuEntry(ROOT_ID, label = "", visible = true) // visible=true pour le root
     }
 
     fun addItem(
@@ -58,7 +53,7 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
     ): Int {
         val id = nextId++
         lock.write {
-            items[id] = MenuEntry(id, label, true, false, true, checkable, checked, false,
+            items[id] = MenuEntry(id, label, true, true, true, checkable, checked, false,
                 onClick = onClick, parent = parent)
             items[parent]?.children?.add(id)
             bumpVersionLocked()
@@ -70,7 +65,7 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
     fun addSeparator(parent: Int = ROOT_ID): Int {
         val id = nextId++
         lock.write {
-            items[id] = MenuEntry(id, label = "", enabled = true, sep = true, parent = parent)
+            items[id] = MenuEntry(id, label = "", enabled = true, visible = true, visibleSet = true, sep = true, parent = parent)
             items[parent]?.children?.add(id)
             bumpVersionLocked()
         }
@@ -87,18 +82,20 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
     fun resetMenu() {
         lock.write {
             items.clear()
-            items[ROOT_ID] = MenuEntry(ROOT_ID, label = "", visible = false)
+            items[ROOT_ID] = MenuEntry(ROOT_ID, label = "", visible = true)
             nextId = 1
             bumpVersionLocked()
         }
         emitLayoutUpdated()
     }
 
-    override fun GetLayout(parentID: Int, recursionDepth: Int, propertyNames: Array<String>): LayoutReply =
-        lock.read {
+    override fun GetLayout(parentID: Int, recursionDepth: Int, propertyNames: Array<String>): LayoutReply {
+        println("GetLayout called: parentID=$parentID, recursionDepth=$recursionDepth")
+        return lock.read {
             val node = buildLayoutNodeLocked(parentID, recursionDepth)
             LayoutReply(UInt32(menuVersion.toLong()), node)
         }
+    }
 
     override fun GetGroupProperties(ids: Array<Int>, propertyNames: Array<String>): Array<MenuProperty> =
         lock.read {
@@ -121,7 +118,11 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
         return emptyArray()
     }
 
-    override fun AboutToShow(id: Int): Boolean = false
+    override fun AboutToShow(id: Int): Boolean {
+        println("AboutToShow called for id=$id")
+        // Retourner true si on a des mises à jour à faire
+        return false
+    }
     override fun AboutToShowGroup(ids: Array<Int>): ShowGroupReply = ShowGroupReply(emptyArray(), emptyArray())
     override fun getObjectPath(): String = objectPath
 
@@ -155,32 +156,34 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
     private fun propsLocked(e: MenuEntry): Map<String, Variant<*>> {
         val p = LinkedHashMap<String, Variant<*>>()
 
-        // CRITICAL: Properties must match exactly what Go sends
+        // CRITICAL: Properties must match exactly what desktop environments expect
         if (e.sep) {
             p["type"] = Variant("separator")
+            // Un separator doit avoir visible=true
+            p["visible"] = Variant(true)
             return p
         }
 
-        // For root item, don't send label/enabled/visible
+        // Always include these properties for non-root items
         if (e.id != ROOT_ID) {
             p["label"] = Variant(e.label)
             p["enabled"] = Variant(e.enabled)
-            if (e.visibleSet) {
-                p["visible"] = Variant(e.visible)
+            p["visible"] = Variant(e.visible)
+        }
+
+        // Toggle properties - toujours les inclure pour les items normaux
+        if (e.id != ROOT_ID) {
+            if (e.checkable) {
+                p["toggle-type"] = Variant("checkmark")
+                p["toggle-state"] = Variant(if (e.checked) 1 else 0)
+            } else {
+                p["toggle-type"] = Variant("")
+                p["toggle-state"] = Variant(0)
             }
         }
 
-        // Toggle properties
-        if (e.checkable) {
-            p["toggle-type"] = Variant("checkmark")
-            p["toggle-state"] = Variant(if (e.checked) 1 else 0)
-        } else if (e.id != ROOT_ID) {
-            p["toggle-type"] = Variant("")
-            p["toggle-state"] = Variant(0)
-        }
-
         // Children display
-        if (e.id != ROOT_ID && e.children.isNotEmpty()) {
+        if (e.children.isNotEmpty()) {
             p["children-display"] = Variant("submenu")
         }
 
@@ -199,19 +202,12 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
 
     private fun bumpVersionLocked() {
         menuVersion++
-        emitMenuPropertiesChanged(mapOf("Version" to Variant(UInt32(menuVersion.toLong()))))
     }
 
     internal fun emitLayoutUpdated() {
         runCatching {
             conn.sendMessage(LayoutUpdatedSignal(objectPath, UInt32(menuVersion.toLong()), ROOT_ID))
         }.onFailure { System.err.println("emitLayoutUpdated(): ${it.message}") }
-    }
-
-    fun emitMenuPropertiesChanged(changed: Map<String, Variant<*>>) {
-        runCatching {
-            conn.sendMessage(PropertiesChangedSignal(objectPath, IFACE_MENU, changed))
-        }.onFailure { System.err.println("emitMenuPropertiesChanged(): ${it.message}") }
     }
 
     override fun <T : Any?> Get(iface: String?, prop: String?): T {

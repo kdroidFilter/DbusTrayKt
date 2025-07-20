@@ -7,10 +7,6 @@ import org.freedesktop.dbus.interfaces.Properties
 import org.freedesktop.dbus.messages.DBusSignal
 import org.freedesktop.dbus.types.Variant
 import org.freedesktop.dbus.annotations.DBusInterfaceName
-import java.awt.image.BufferedImage
-import java.io.ByteArrayInputStream
-import java.io.ByteArrayOutputStream
-import javax.imageio.ImageIO
 
 class NewIconSignal(path: String) : DBusSignal(path, IFACE_SNI, "NewIcon"), DBusInterface {
     override fun getObjectPath(): String = path
@@ -35,38 +31,37 @@ class StatusNotifierItemImpl(
     private var dActivateTime: Long = 0L
 
     override fun Activate(x: Int, y: Int) {
+        println("Activate called at ($x, $y)")
         val now = System.currentTimeMillis()
-        if (dActivateTime == 0L) {
-            dActivateTime = now
-            return
+        if (onClick == null) {
+            throw UnknownMethodException("Unknown method")
         }
-        if (now - dActivateTime < 500) {  // Hardcoded to match Go default
-            onDblClick?.invoke()
-            dActivateTime = now
-            return
+        if (now - dActivateTime < 500 && onDblClick != null) {
+            onDblClick.invoke()
         } else {
-            dActivateTime = now
+            onClick.invoke()
         }
-        onClick?.invoke() ?: throw UnknownMethodException("Unknown method")
+        dActivateTime = now
     }
 
     override fun SecondaryActivate(x: Int, y: Int) {
+        println("SecondaryActivate called at ($x, $y)")
         throw UnknownMethodException("Unknown method")
     }
 
     override fun ContextMenu(x: Int, y: Int) {
-        if (onRightClick != null) {
-            onRightClick.invoke()
-        } else {
-            throw UnknownMethodException("Unknown method")
-        }
+        println("ContextMenu called at ($x, $y)")
+        // Ne PAS lever d'exception - laisser le système afficher le menu
+        onRightClick?.invoke()
     }
 
     override fun Scroll(delta: Int, orientation: String) {
+        println("Scroll called: delta=$delta, orientation=$orientation")
         throw UnknownMethodException("Unknown method")
     }
 
     override fun <T> Get(iface: String?, prop: String?): T {
+        println("Get called: iface=$iface, prop=$prop")
         require(iface == IFACE_SNI) { "Unknown interface: $iface" }
         @Suppress("UNCHECKED_CAST")
         return when (prop) {
@@ -76,52 +71,64 @@ class StatusNotifierItemImpl(
             "Status" -> "Active" as T
             "WindowId" -> 0 as T
             "IconName" -> "" as T
-            "IconPixmap" -> arrayOf(convertToPixels(iconBytes)) as T
+            "IconPixmap" -> buildPixmaps(iconBytes) as T
             "OverlayIconName" -> "" as T
             "OverlayIconPixmap" -> emptyArray<PxStruct>() as T
             "AttentionIconName" -> "" as T
             "AttentionIconPixmap" -> emptyArray<PxStruct>() as T
             "AttentionMovieName" -> "" as T
             "IconThemePath" -> "" as T
-            "ItemIsMenu" -> true as T
-            "Menu" -> PATH_MENU as T
+            "ItemIsMenu" -> {
+                println("  -> ItemIsMenu requested, returning false")
+                false as T
+            }
+            "Menu" -> {
+                // CRITICAL: Return the menu path relative to our service
+                val menuPath = PATH_MENU
+                println("  -> Menu path requested, returning $menuPath")
+                menuPath as T
+            }
             "ToolTip" -> TooltipStruct("", emptyList(), tooltip, "") as T
             else -> throw IllegalArgumentException("Unknown property: $prop")
         }
     }
 
     override fun <A> Set(iface: String?, prop: String?, value: A?) {
+        println("Set called: iface=$iface, prop=$prop, value=$value")
         require(iface == IFACE_SNI) { "Unknown interface: $iface" }
         when (prop) {
             "Title" -> if (value is String) title = value
             "IconPixmap" -> @Suppress("UNCHECKED_CAST")
             if (value is Array<*> && value.isNotEmpty() && value[0] is PxStruct) {
-                iconBytes = convertFromPixels(value[0] as PxStruct)
+                iconBytes = argbToPng(value[0] as PxStruct)
             }
             "ToolTip" -> if (value is TooltipStruct) tooltip = value.v2
         }
     }
 
     override fun GetAll(iface: String?): Map<String, Variant<*>> {
+        println("GetAll called for iface=$iface")
         require(iface == IFACE_SNI) { "Unknown interface: $iface" }
-        return mapOf(
+        val result = mapOf(
             "Category" to Variant("ApplicationStatus"),
             "Id" to Variant("1"),
             "Title" to Variant(title),
             "Status" to Variant("Active"),
             "WindowId" to Variant(0),
             "IconName" to Variant(""),
-            "IconPixmap" to Variant(arrayOf(convertToPixels(iconBytes))),
+            "IconPixmap" to Variant(buildPixmaps(iconBytes)),
             "OverlayIconName" to Variant(""),
             "OverlayIconPixmap" to Variant(emptyArray<PxStruct>()),
             "AttentionIconName" to Variant(""),
             "AttentionIconPixmap" to Variant(emptyArray<PxStruct>()),
             "AttentionMovieName" to Variant(""),
             "IconThemePath" to Variant(""),
-            "ItemIsMenu" to Variant(true),
+            "ItemIsMenu" to Variant(false),
             "Menu" to Variant(PATH_MENU),
             "ToolTip" to Variant(TooltipStruct("", emptyList(), tooltip, ""))
         )
+        println("  -> Returning properties with Menu=$PATH_MENU")
+        return result
     }
 
     override fun Introspect(): String = IntrospectXml.itemXml
@@ -142,56 +149,6 @@ class StatusNotifierItemImpl(
 
     fun setTooltip(t: String) {
         tooltip = t
-        // No signal emitted, matching Go
-    }
-
-    private fun convertToPixels(bytes: ByteArray): PxStruct {
-        if (bytes.isEmpty()) return PxStruct(0, 0, byteArrayOf())
-        try {
-            val input = ByteArrayInputStream(bytes)
-            val img: BufferedImage = ImageIO.read(input)
-            val w = img.width
-            val h = img.height
-            val pix = ByteArray(w * h * 4)
-            var index = 0
-            for (y in 0 until h) {
-                for (x in 0 until w) {
-                    val argb = img.getRGB(x, y)
-                    pix[index++] = ((argb shr 24) and 0xFF).toByte() // A
-                    pix[index++] = ((argb shr 16) and 0xFF).toByte() // R
-                    pix[index++] = ((argb shr 8) and 0xFF).toByte() // G
-                    pix[index++] = (argb and 0xFF).toByte() // B
-                }
-            }
-            return PxStruct(w, h, pix)
-        } catch (e: Exception) {
-            System.err.println("Failed to decode icon: ${e.message}")
-            return PxStruct(0, 0, byteArrayOf())
-        }
-    }
-
-    private fun convertFromPixels(px: PxStruct): ByteArray {
-        if (px.w == 0 || px.h == 0) return byteArrayOf()
-        try {
-            val img = BufferedImage(px.w, px.h, BufferedImage.TYPE_INT_ARGB)
-            var index = 0
-            for (y in 0 until px.h) {
-                for (x in 0 until px.w) {
-                    val a = px.pix[index++].toInt() and 0xFF
-                    val r = px.pix[index++].toInt() and 0xFF
-                    val g = px.pix[index++].toInt() and 0xFF
-                    val b = px.pix[index++].toInt() and 0xFF
-                    val argb = (a shl 24) or (r shl 16) or (g shl 8) or b
-                    img.setRGB(x, y, argb)
-                }
-            }
-            val out = ByteArrayOutputStream()
-            ImageIO.write(img, "png", out)
-            return out.toByteArray()
-        } catch (e: Exception) {
-            System.err.println("Failed to encode icon: ${e.message}")
-            return byteArrayOf()
-        }
     }
 
     override fun getObjectPath(): String = PATH_ITEM

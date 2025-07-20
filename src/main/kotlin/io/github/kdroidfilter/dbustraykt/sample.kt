@@ -7,19 +7,23 @@ import javax.imageio.ImageIO
 import kotlin.system.exitProcess
 
 fun main() {
-
     startDBusMonitor("dbus_log.txt")
     val iconBytes = generateIcon()
 
+    // Démarrer le systray
     Systray.run(
         iconBytes = iconBytes,
         title = "Tray Demo",
         tooltip = "Systray demo (Kotlin/DBus)",
         onClick = { println("Primary click") },
-
+        onRightClick = { println("Right click - menu should appear") }
     )
 
-    // Build a minimal functional menu
+    // IMPORTANT: Attendre un peu que le systray soit complètement initialisé
+    Thread.sleep(500)
+
+    // Construire le menu APRÈS que le systray soit initialisé
+    println("Building menu...")
     val helloId = Systray.addMenuItem("Say Hello") {
         println("Hello from tray menu")
     }
@@ -33,6 +37,12 @@ fun main() {
         exitProcess(0)
     }
 
+    println("Menu built with ${3} items plus separator")
+
+    // Garder le programme en vie
+    while (Systray.running) {
+        Thread.sleep(1000)
+    }
 }
 
 /* ------------------------------------------------------------------------------------------------

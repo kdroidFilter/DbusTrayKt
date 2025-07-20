@@ -2,12 +2,14 @@ package io.github.kdroidfilter.dbustraykt
 
 import org.freedesktop.dbus.connections.impl.DBusConnection
 import org.freedesktop.dbus.connections.impl.DBusConnectionBuilder
+import org.freedesktop.dbus.interfaces.DBusInterface
 
 object Systray {
     internal lateinit var conn: DBusConnection
     lateinit var itemImpl: StatusNotifierItemImpl
-    private lateinit var menuImpl: DbusMenu
+    lateinit var menuImpl: DbusMenu
     @Volatile internal var running = false
+    private lateinit var serviceName: String
 
     @JvmStatic fun run(
         iconBytes: ByteArray,
@@ -20,42 +22,64 @@ object Systray {
         if (running) return
         running = true
 
-// 1. Connection
+        // 1. Connection
         conn = DBusConnectionBuilder.forSessionBus().build()
 
-// 2. Objects
-        itemImpl = StatusNotifierItemImpl(iconBytes, title, tooltip, onClick, onDblClick, onRightClick)
+        // 2. Create objects
         menuImpl = DbusMenu(conn, PATH_MENU)
+        itemImpl = StatusNotifierItemImpl(iconBytes, title, tooltip, onClick, onDblClick, onRightClick)
 
-// 3. Export objects with all interfaces
-        conn.exportObject(PATH_ITEM, itemImpl) // Exports StatusNotifierItem, Properties, and Introspectable
-        conn.exportObject(PATH_MENU, menuImpl) // Exports DbusMenuMinimal, Properties, and Introspectable
+        // 3. Export objects BEFORE requesting the bus name
+        conn.exportObject(PATH_MENU, menuImpl)
+        conn.exportObject(PATH_ITEM, itemImpl)
+        println("Exported objects at $PATH_ITEM and $PATH_MENU")
 
-// 4. Unique name
-        val uniqueName = "org.kde.StatusNotifierItem-${ProcessHandle.current().pid()}-1"
-        conn.requestBusName(uniqueName)
+        // 4. Request the bus name
+        serviceName = "org.kde.StatusNotifierItem-${ProcessHandle.current().pid()}-1"
+        conn.requestBusName(serviceName)
+        println("Requested bus name: $serviceName")
 
-// 5. Register watcher
+        // 5. Register with watcher
         runCatching {
             val watcher = conn.getRemoteObject(
                 "org.kde.StatusNotifierWatcher",
                 "/StatusNotifierWatcher",
                 StatusNotifierWatcher::class.java
             )
-            watcher.RegisterStatusNotifierItem(uniqueName)
-            println("Successfully registered with StatusNotifierWatcher")
-        }.onFailure {
-            System.err.println("Failed to register with StatusNotifierWatcher: ${it.message}. Continuing without watcher.")
+            // Try registering with just the service name
+            watcher.RegisterStatusNotifierItem(serviceName)
+            println("Registered with watcher: $serviceName")
+        }.onFailure { e1 ->
+            println("First registration failed: ${e1.message}")
+            // Try with full path
+            runCatching {
+                val watcher = conn.getRemoteObject(
+                    "org.kde.StatusNotifierWatcher",
+                    "/StatusNotifierWatcher",
+                    StatusNotifierWatcher::class.java
+                )
+                watcher.RegisterStatusNotifierItem("$serviceName$PATH_ITEM")
+                println("Registered with watcher: $serviceName$PATH_ITEM")
+            }.onFailure { e2 ->
+                System.err.println("Failed to register: ${e2.message}")
+            }
         }
+
+        // Debug: print our connection info
+        println("Our unique bus name: ${conn.uniqueName}")
+        println("Our service name: $serviceName")
     }
 
     @JvmStatic fun quit() {
         if (!running) return
         running = false
         runCatching {
-            if (conn.isConnected) {
+            if (::conn.isInitialized && conn.isConnected) {
                 conn.unExportObject(PATH_ITEM)
                 conn.unExportObject(PATH_MENU)
+                if (::serviceName.isInitialized) {
+                    conn.releaseBusName(serviceName)
+                }
                 Thread.sleep(200)
                 conn.close()
             }
