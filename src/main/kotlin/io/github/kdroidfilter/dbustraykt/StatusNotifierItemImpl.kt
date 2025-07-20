@@ -1,12 +1,13 @@
 package io.github.kdroidfilter.dbustraykt
 
+import org.freedesktop.dbus.DBusPath
 import org.freedesktop.dbus.exceptions.DBusExecutionException
 import org.freedesktop.dbus.interfaces.DBusInterface
 import org.freedesktop.dbus.interfaces.Introspectable
 import org.freedesktop.dbus.interfaces.Properties
 import org.freedesktop.dbus.messages.DBusSignal
-import org.freedesktop.dbus.types.Variant
 import org.freedesktop.dbus.annotations.DBusInterfaceName
+import org.freedesktop.dbus.types.Variant
 
 class NewIconSignal(path: String) : DBusSignal(path, IFACE_SNI, "NewIcon"), DBusInterface {
     override fun getObjectPath(): String = path
@@ -82,12 +83,7 @@ class StatusNotifierItemImpl(
                 println("  -> ItemIsMenu requested, returning false")
                 false as T
             }
-            "Menu" -> {
-                // CRITICAL: Return the menu path relative to our service
-                val menuPath = PATH_MENU
-                println("  -> Menu path requested, returning $menuPath")
-                menuPath as T
-            }
+            "Menu" -> DBusPath(PATH_MENU) as T
             "ToolTip" -> TooltipStruct("", emptyList(), tooltip, "") as T
             else -> throw IllegalArgumentException("Unknown property: $prop")
         }
@@ -124,7 +120,7 @@ class StatusNotifierItemImpl(
             "AttentionMovieName" to Variant(""),
             "IconThemePath" to Variant(""),
             "ItemIsMenu" to Variant(false),
-            "Menu" to Variant(PATH_MENU),
+            "Menu" to Variant(DBusPath(PATH_MENU)),
             "ToolTip" to Variant(TooltipStruct("", emptyList(), tooltip, ""))
         )
         println("  -> Returning properties with Menu=$PATH_MENU")

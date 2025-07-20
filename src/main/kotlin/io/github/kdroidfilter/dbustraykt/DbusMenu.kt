@@ -155,23 +155,16 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
 
     private fun propsLocked(e: MenuEntry): Map<String, Variant<*>> {
         val p = LinkedHashMap<String, Variant<*>>()
-
-        // CRITICAL: Properties must match exactly what desktop environments expect
         if (e.sep) {
             p["type"] = Variant("separator")
-            // Un separator doit avoir visible=true
             p["visible"] = Variant(true)
             return p
         }
+        // Include these for all items, including root
+        p["label"] = Variant(e.label)
+        p["enabled"] = Variant(e.enabled)
+        p["visible"] = Variant(e.visible)
 
-        // Always include these properties for non-root items
-        if (e.id != ROOT_ID) {
-            p["label"] = Variant(e.label)
-            p["enabled"] = Variant(e.enabled)
-            p["visible"] = Variant(e.visible)
-        }
-
-        // Toggle properties - toujours les inclure pour les items normaux
         if (e.id != ROOT_ID) {
             if (e.checkable) {
                 p["toggle-type"] = Variant("checkmark")
@@ -181,12 +174,9 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
                 p["toggle-state"] = Variant(0)
             }
         }
-
-        // Children display
         if (e.children.isNotEmpty()) {
             p["children-display"] = Variant("submenu")
         }
-
         return p
     }
 
@@ -214,7 +204,7 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
         require(iface == IFACE_MENU) { "Unknown interface: $iface" }
         @Suppress("UNCHECKED_CAST")
         return when (prop) {
-            "Version"       -> UInt32(menuVersion.toLong()) as T
+            "Version"       -> UInt32(4) as T  // Fixed protocol version
             "Status"        -> "normal" as T
             "TextDirection" -> "ltr" as T
             "IconThemePath" -> emptyArray<String>() as T
@@ -227,7 +217,7 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
     }
 
     override fun GetAll(iface: String?): Map<String, Variant<*>> = mapOf(
-        "Version" to Variant(UInt32(menuVersion.toLong())),
+        "Version" to Variant(UInt32(4)),  // Fixed protocol version
         "Status" to Variant("normal"),
         "TextDirection" to Variant("ltr"),
         "IconThemePath" to Variant(emptyArray<String>())
