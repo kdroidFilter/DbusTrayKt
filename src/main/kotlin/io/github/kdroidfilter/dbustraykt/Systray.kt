@@ -4,7 +4,26 @@ import org.freedesktop.dbus.connections.impl.DBusConnection
 import org.freedesktop.dbus.connections.impl.DBusConnectionBuilder
 import org.freedesktop.dbus.interfaces.DBusInterface
 
-object Systray {
+object Systray : IMenu {
+    /**
+     * Shows the menu by simulating the sequence of DBus method calls that would normally
+     * be triggered when the user right-clicks on the tray icon.
+     */
+    override fun showMenu() {
+        if (!::menuImpl.isInitialized) return
+        
+        // Emit the AboutToShow signal
+        try {
+            // This sequence of calls simulates what happens when the menu is shown
+            // through the DBus interface
+            menuImpl.AboutToShow(0)
+            
+            // Force a layout update to ensure the menu is up-to-date
+            menuImpl.emitLayoutUpdated()
+        } catch (e: Exception) {
+            System.err.println("Error showing menu: ${e.message}")
+        }
+    }
     internal lateinit var conn: DBusConnection
     lateinit var itemImpl: StatusNotifierItemImpl
     lateinit var menuImpl: DbusMenu

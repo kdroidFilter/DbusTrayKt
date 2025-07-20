@@ -15,8 +15,8 @@ fun main() {
         iconBytes = iconBytes,
         title = "Tray Demo",
         tooltip = "Systray demo (Kotlin/DBus)",
-        onClick = { println("Primary click") },
-        onRightClick = { println("Right click - menu should appear") }
+        onClick = { println("Primary click") }
+        // Removed onRightClick callback to let the system handle right-click events
     )
 
     // IMPORTANT: Attendre un peu que le systray soit complètement initialisé
@@ -38,7 +38,7 @@ fun main() {
     }
 
     println("Menu built with ${3} items plus separator")
-
+    Systray.menuImpl.emitLayoutUpdated()
     // Garder le programme en vie
     while (Systray.running) {
         Thread.sleep(1000)

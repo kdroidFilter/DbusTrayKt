@@ -120,7 +120,6 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
 
     override fun AboutToShow(id: Int): Boolean {
         println("AboutToShow called for id=$id")
-        // Retourner true si on a des mises à jour à faire
         return false
     }
     override fun AboutToShowGroup(ids: Array<Int>): ShowGroupReply = ShowGroupReply(emptyArray(), emptyArray())
@@ -160,12 +159,10 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
             p["visible"] = Variant(true)
             return p
         }
-        // Include these for all items, including root
-        p["label"] = Variant(e.label)
-        p["enabled"] = Variant(e.enabled)
-        p["visible"] = Variant(e.visible)
-
-        if (e.id != ROOT_ID) {
+        if (e.id != ROOT_ID) {  // Skip non-essential props for root
+            p["label"] = Variant(e.label)
+            p["enabled"] = Variant(e.enabled)
+            p["visible"] = Variant(e.visible)
             if (e.checkable) {
                 p["toggle-type"] = Variant("checkmark")
                 p["toggle-state"] = Variant(if (e.checked) 1 else 0)
@@ -196,7 +193,18 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
 
     internal fun emitLayoutUpdated() {
         runCatching {
+            // Update the Version property
+            val versionVariant = Variant(UInt32(menuVersion.toLong()))
+            
+            // Emit the LayoutUpdated signal
             conn.sendMessage(LayoutUpdatedSignal(objectPath, UInt32(menuVersion.toLong()), ROOT_ID))
+            
+            // Also emit a PropertiesChanged signal to notify clients that the Version property has changed
+            val changedProps = mapOf("Version" to versionVariant)
+            val signal = org.freedesktop.dbus.interfaces.Properties.PropertiesChanged(
+                objectPath, IFACE_MENU, changedProps, emptyList()
+            )
+            conn.sendMessage(signal)
         }.onFailure { System.err.println("emitLayoutUpdated(): ${it.message}") }
     }
 
@@ -204,7 +212,7 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
         require(iface == IFACE_MENU) { "Unknown interface: $iface" }
         @Suppress("UNCHECKED_CAST")
         return when (prop) {
-            "Version"       -> UInt32(4) as T  // Fixed protocol version
+            "Version"       -> UInt32(menuVersion.toLong()) as T  // Current menu version
             "Status"        -> "normal" as T
             "TextDirection" -> "ltr" as T
             "IconThemePath" -> emptyArray<String>() as T
@@ -217,7 +225,7 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
     }
 
     override fun GetAll(iface: String?): Map<String, Variant<*>> = mapOf(
-        "Version" to Variant(UInt32(4)),  // Fixed protocol version
+        "Version" to Variant(UInt32(menuVersion.toLong())),  // Current menu version
         "Status" to Variant("normal"),
         "TextDirection" to Variant("ltr"),
         "IconThemePath" to Variant(emptyArray<String>())

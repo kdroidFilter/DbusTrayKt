@@ -47,12 +47,17 @@ class StatusNotifierItemImpl(
 
     override fun SecondaryActivate(x: Int, y: Int) {
         println("SecondaryActivate called at ($x, $y)")
-        throw UnknownMethodException("Unknown method")
+        // Try to show the menu directly
+        Systray.showMenu()
+        // If onRightClick is set, call it
+        onRightClick?.invoke()
     }
 
     override fun ContextMenu(x: Int, y: Int) {
         println("ContextMenu called at ($x, $y)")
-        // Ne PAS lever d'exception - laisser le système afficher le menu
+        // Try to show the menu directly
+        Systray.showMenu()
+        // If onRightClick is set, call it
         onRightClick?.invoke()
     }
 
@@ -80,8 +85,8 @@ class StatusNotifierItemImpl(
             "AttentionMovieName" -> "" as T
             "IconThemePath" -> "" as T
             "ItemIsMenu" -> {
-                println("  -> ItemIsMenu requested, returning false")
-                false as T
+                println("  -> ItemIsMenu requested, returning true")
+                true as T
             }
             "Menu" -> DBusPath(PATH_MENU) as T
             "ToolTip" -> TooltipStruct("", emptyList(), tooltip, "") as T
@@ -119,7 +124,7 @@ class StatusNotifierItemImpl(
             "AttentionIconPixmap" to Variant(emptyArray<PxStruct>()),
             "AttentionMovieName" to Variant(""),
             "IconThemePath" to Variant(""),
-            "ItemIsMenu" to Variant(false),
+            "ItemIsMenu" to Variant(true),
             "Menu" to Variant(DBusPath(PATH_MENU)),
             "ToolTip" to Variant(TooltipStruct("", emptyList(), tooltip, ""))
         )
