@@ -34,13 +34,12 @@ class StatusNotifierItemImpl(
     override fun Activate(x: Int, y: Int) {
         println("Activate called at ($x, $y)")
         val now = System.currentTimeMillis()
-        if (onClick == null) {
-            throw UnknownMethodException("Unknown method")
-        }
-        if (now - dActivateTime < 500 && onDblClick != null) {
-            onDblClick.invoke()
-        } else {
-            onClick.invoke()
+        if (onClick != null) {
+            if (now - dActivateTime < 500 && onDblClick != null) {
+                onDblClick.invoke()
+            } else {
+                onClick.invoke()
+            }
         }
         dActivateTime = now
     }
@@ -63,7 +62,14 @@ class StatusNotifierItemImpl(
 
     override fun Scroll(delta: Int, orientation: String) {
         println("Scroll called: delta=$delta, orientation=$orientation")
-        throw UnknownMethodException("Unknown method")
+        // Simply return without throwing an exception
+        // This allows the system to continue with other operations
+    }
+    
+    override fun ProvideXdgActivationToken(token: String) {
+        println("ProvideXdgActivationToken called with token: $token")
+        // Simply return without throwing an exception
+        // This allows the system to continue with the menu activation process
     }
 
     override fun <T> Get(iface: String?, prop: String?): T {

@@ -27,4 +27,5 @@ interface StatusNotifierItem : DBusInterface {
     fun SecondaryActivate(x: Int, y: Int)
     fun ContextMenu(x: Int, y: Int)
     fun Scroll(delta: Int, orientation: String)
+    fun ProvideXdgActivationToken(token: String)
 }

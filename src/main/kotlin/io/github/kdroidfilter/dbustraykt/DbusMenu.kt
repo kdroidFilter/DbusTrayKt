@@ -59,6 +59,11 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
             bumpVersionLocked()
         }
         emitLayoutUpdated()
+        
+        // Also emit ItemsPropertiesUpdated signal for the new item
+        val propertyKeys = listOf("label", "enabled", "visible", "toggle-type", "toggle-state")
+        emitItemsPropertiesUpdated(id, propertyKeys)
+        
         return id
     }
 
@@ -70,6 +75,11 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
             bumpVersionLocked()
         }
         emitLayoutUpdated()
+        
+        // Also emit ItemsPropertiesUpdated signal for the new separator
+        val propertyKeys = listOf("type", "visible")
+        emitItemsPropertiesUpdated(id, propertyKeys)
+        
         return id
     }
 
@@ -87,12 +97,38 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
             bumpVersionLocked()
         }
         emitLayoutUpdated()
+        
+        // Also emit ItemsPropertiesUpdated signal for the root menu item
+        // This ensures clients know the menu has been completely reset
+        val propertyKeys = listOf("children-display")
+        emitItemsPropertiesUpdated(ROOT_ID, propertyKeys)
     }
 
     override fun GetLayout(parentID: Int, recursionDepth: Int, propertyNames: Array<String>): LayoutReply {
-        println("GetLayout called: parentID=$parentID, recursionDepth=$recursionDepth")
+        println("GetLayout called: parentID=$parentID, recursionDepth=$recursionDepth, propertyNames=${propertyNames.joinToString()}")
+        
         return lock.read {
+            // Check if the requested parent ID exists
+            val parentExists = items.containsKey(parentID)
+            println("  -> Parent ID $parentID exists: $parentExists")
+            
+            if (!parentExists) {
+                println("  -> WARNING: Requested parent ID $parentID does not exist in menu!")
+                // Return an empty layout if the parent doesn't exist
+                return@read LayoutReply(UInt32(menuVersion.toLong()), LayoutNode(0, emptyMap(), emptyArray()))
+            }
+            
+            // Build the layout node
             val node = buildLayoutNodeLocked(parentID, recursionDepth)
+            
+            // Log the layout being returned
+            println("  -> Returning layout with revision=${menuVersion}")
+            println("  -> Root node: id=${node.id}, properties=${node.properties.keys.joinToString()}, children=${node.children.size}")
+            
+            // Log the menu structure
+            println("  -> Menu structure being returned:")
+            logMenuStructure(parentID, 0)
+            
             LayoutReply(UInt32(menuVersion.toLong()), node)
         }
     }
@@ -120,21 +156,27 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
 
     override fun AboutToShow(id: Int): Boolean {
         println("AboutToShow called for id=$id")
+        // Simply return false, like the Go implementation
+        // This tells the system that no update is needed
         return false
     }
     override fun AboutToShowGroup(ids: Array<Int>): ShowGroupReply = ShowGroupReply(emptyArray(), emptyArray())
     override fun getObjectPath(): String = objectPath
 
     private fun handleEvent(id: Int, eventID: String) {
-        if (eventID != "clicked") return
-        val onClick: (() -> Unit)?
-        lock.read {
-            val e = items[id] ?: return
-            if (e.sep) return
-            println("Menu item clicked: id=$id, label=${e.label}")
-            onClick = e.onClick
+        println("Event received: id=$id, eventID=$eventID")
+        
+        // Only handle "clicked" events, like the Go implementation
+        if (eventID == "clicked") {
+            val onClick: (() -> Unit)?
+            lock.read {
+                val e = items[id] ?: return
+                if (e.sep) return
+                println("Menu item clicked: id=$id, label=${e.label}")
+                onClick = e.onClick
+            }
+            onClick?.invoke()
         }
-        onClick?.invoke()
     }
 
     private fun buildLayoutNodeLocked(id: Int, depth: Int): LayoutNode {
@@ -179,12 +221,20 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
 
     private fun mutate(id: Int, op: (MenuEntry) -> List<String>) {
         val changedKeys: List<String>
+        val entry: MenuEntry?
         lock.write {
             val e = items[id] ?: return
             changedKeys = op(e)
             if (changedKeys.isNotEmpty()) bumpVersionLocked()
+            entry = e
         }
-        if (changedKeys.isNotEmpty()) emitLayoutUpdated()
+        if (changedKeys.isNotEmpty()) {
+            emitLayoutUpdated()
+            // Also emit ItemsPropertiesUpdated signal to notify about specific property changes
+            if (entry != null) {
+                emitItemsPropertiesUpdated(id, changedKeys)
+            }
+        }
     }
 
     private fun bumpVersionLocked() {
@@ -192,12 +242,14 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
     }
 
     internal fun emitLayoutUpdated() {
+        println("Emitting LayoutUpdated signal with version=${menuVersion}")
         runCatching {
             // Update the Version property
             val versionVariant = Variant(UInt32(menuVersion.toLong()))
             
             // Emit the LayoutUpdated signal
             conn.sendMessage(LayoutUpdatedSignal(objectPath, UInt32(menuVersion.toLong()), ROOT_ID))
+            println("  -> Sent LayoutUpdatedSignal with revision=${menuVersion}, parent=${ROOT_ID}")
             
             // Also emit a PropertiesChanged signal to notify clients that the Version property has changed
             val changedProps = mapOf("Version" to versionVariant)
@@ -205,7 +257,37 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
                 objectPath, IFACE_MENU, changedProps, emptyList()
             )
             conn.sendMessage(signal)
-        }.onFailure { System.err.println("emitLayoutUpdated(): ${it.message}") }
+            println("  -> Sent PropertiesChanged signal for Version property")
+            
+            // Log the current menu structure
+            lock.read {
+                println("  -> Current menu structure:")
+                logMenuStructure(ROOT_ID, 0)
+            }
+        }.onFailure { System.err.println("ERROR in emitLayoutUpdated(): ${it.message}") }
+    }
+    
+    private fun logMenuStructure(id: Int, indent: Int) {
+        val entry = items[id] ?: return
+        val indentStr = "    ".repeat(indent)
+        if (entry.sep) {
+            println("$indentStr- Separator (id=${entry.id})")
+        } else {
+            val childrenInfo = if (entry.children.isNotEmpty()) ", children=${entry.children.size}" else ""
+            println("$indentStr- ${entry.label} (id=${entry.id}, enabled=${entry.enabled}, visible=${entry.visible}$childrenInfo)")
+            entry.children.forEach { childId ->
+                logMenuStructure(childId, indent + 1)
+            }
+        }
+    }
+    
+    /**
+     * This method is intentionally disabled to match the Go implementation,
+     * which doesn't emit the ItemsPropertiesUpdated signal.
+     * The Go implementation only uses the LayoutUpdated signal to notify clients about changes.
+     */
+    internal fun emitItemsPropertiesUpdated(id: Int, changedKeys: List<String>) {
+        // Do nothing - this signal is not used in the Go implementation
     }
 
     override fun <T : Any?> Get(iface: String?, prop: String?): T {
@@ -232,4 +314,23 @@ class DbusMenu(private val conn: DBusConnection, private val objectPath: String 
     )
 
     override fun Introspect(): String = IntrospectXml.menuXml
+    
+    /**
+     * Updates all menu item properties and emits the appropriate signals.
+     * This is useful when the menu needs to be refreshed completely.
+     */
+    fun updateAllMenuItemProperties() {
+        println("Updating all menu item properties")
+        lock.read {
+            items.values.forEach { entry ->
+                val propertyKeys = if (entry.sep) {
+                    listOf("type", "visible")
+                } else {
+                    listOf("label", "enabled", "visible", "toggle-type", "toggle-state", "children-display")
+                }
+                emitItemsPropertiesUpdated(entry.id, propertyKeys)
+            }
+        }
+        println("All menu item properties updated")
+    }
 }

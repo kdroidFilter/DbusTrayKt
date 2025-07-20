@@ -12,13 +12,11 @@ object Systray : IMenu {
     override fun showMenu() {
         if (!::menuImpl.isInitialized) return
         
-        // Emit the AboutToShow signal
+        println("Showing menu...")
+        
         try {
-            // This sequence of calls simulates what happens when the menu is shown
-            // through the DBus interface
-            menuImpl.AboutToShow(0)
-            
-            // Force a layout update to ensure the menu is up-to-date
+            // Simply emit a layout updated signal to refresh the menu
+            // This is similar to what the Go implementation would do
             menuImpl.emitLayoutUpdated()
         } catch (e: Exception) {
             System.err.println("Error showing menu: ${e.message}")

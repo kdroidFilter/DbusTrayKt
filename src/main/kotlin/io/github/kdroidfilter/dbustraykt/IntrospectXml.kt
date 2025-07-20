@@ -122,6 +122,9 @@ object IntrospectXml {
 <arg name="delta" type="i" direction="in"/>
 <arg name="orientation" type="s" direction="in"/>
 </method>
+<method name="ProvideXdgActivationToken">
+<arg name="token" type="s" direction="in"/>
+</method>
 <!--  Signals: the client wants to change something in the status -->
 <signal name="NewTitle"> </signal>
 <signal name="NewIcon"> </signal>
